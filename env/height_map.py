@@ -76,5 +76,18 @@ class HeightMap:
         
         self.map[x:x+l, y:y+w] = new_height
 
+    def update_region_absolute(self, x, y, l, w, new_height):
+        """
+        Update region untuk absolute z positioning (digunakan dalam repacking).
+        
+        Sama dengan update_region tapi untuk clarity dalam repacking context.
+        
+        Args:
+            x, y: koordinat awal
+            l, w: panjang dan lebar region
+            new_height: absolute height untuk region (z + item_height)
+        """
+        self.update_region(x, y, l, w, new_height)
+
     def normalize(self):
         return self.map / self.H

@@ -11,6 +11,7 @@ from action_mask import ActionMask
 # Import dari parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dataset.random_generator import RandomGenerator
+from planning.repack import attempt_repack
 
 
 class ContainerEnv:
@@ -244,6 +245,70 @@ class ContainerEnv:
     def get_max_height(self):
         """Get maximum height in current container."""
         return int(np.max(self.height_map.map))
+    
+    def perform_repack(self, strategy='load_balanced'):
+        """
+        Perform repacking operation untuk reorganisasi items.
+        
+        Args:
+            strategy (str): Repacking strategy ('blf', 'load_balanced', 'min_height', 'auto')
+            
+        Returns:
+            dict: Repacking result dengan:
+                - 'success': bool
+                - 'reward': float (reward untuk repacking action)
+                - 'old_utilization': float
+                - 'new_utilization': float
+                - 'improvement': float
+                - 'description': str
+        """
+        if len(self.placed_items) == 0:
+            return {
+                'success': False,
+                'reward': 0.0,
+                'old_utilization': 0.0,
+                'new_utilization': 0.0,
+                'improvement': 0.0,
+                'description': 'No items to repack'
+            }
+        
+        # Calculate old metrics
+        old_util = self.get_utilization()
+        old_max_height = self.get_max_height()
+        
+        # Attempt repacking
+        repack_result = attempt_repack(self, strategy=strategy)
+        
+        if not repack_result['success']:
+            return {
+                'success': False,
+                'reward': -0.1,  # Penalty untuk repack gagal
+                'old_utilization': old_util,
+                'new_utilization': old_util,
+                'improvement': 0.0,
+                'description': 'Repacking failed'
+            }
+        
+        # Calculate new metrics
+        new_util = self.get_utilization()
+        new_max_height = self.get_max_height()
+        
+        # Calculate improvement
+        height_improvement = old_max_height / max(new_max_height, 1.0)
+        util_improvement = new_util / max(old_util, 0.1)
+        
+        # Reward untuk successful repacking
+        reward = 0.1 + 0.05 * (height_improvement - 1.0)
+        
+        return {
+            'success': True,
+            'reward': reward,
+            'old_utilization': old_util,
+            'new_utilization': new_util,
+            'improvement': height_improvement,
+            'description': repack_result['description'],
+            'strategy': repack_result['strategy_used']
+        }
     
     def render(self):
         """Print container state."""
