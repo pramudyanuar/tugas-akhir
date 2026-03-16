@@ -168,6 +168,7 @@ class Repacker:
                     for x in range(self.L - item_l + 1):
                         z = height_map.max_height_in_region(x, y, item_l, item_w)
                         
+                        # Check height overflow with safety margin
                         if z + item_h <= self.H and self._can_place_at(height_map, x, y, item_l, item_w, item_h, z):
                             height_map.update_region_absolute(x, y, item_l, item_w, z + item_h)
                             new_positions.append((x, y, z))
@@ -258,8 +259,12 @@ class Repacker:
         Returns:
             bool: True jika dapat ditempatkan
         """
-        # Check boundary
-        if x + item_l > self.L or y + item_w > self.W or z + item_h > self.H:
+        # Check boundary dengan safety margin
+        if x + item_l > self.L or y + item_w > self.W:
+            return False
+        
+        # PENTING: z + item_h harus <= H (tidak boleh overflow)
+        if z + item_h > self.H:
             return False
         
         # Check if region is free (all cells at z should be <= z)
@@ -427,12 +432,30 @@ def attempt_repack(env, strategy='load_balanced'):
     result = repacker.auto_repack(env.placed_items, env.placed_positions, strategy)
     
     if result['success']:
-        # Update environment with new positions
+        # Validate new positions don't cause overflow
+        valid = True
+        for (x, y, z), (l, w, h) in zip(result['new_positions'], env.placed_items):
+            if z + h > env.H:
+                valid = False
+                break
+        
+        if not valid:
+            # Repacking result causes overflow, reject it
+            return {
+                'success': False,
+                'new_positions': [],
+                'metric': 0.0,
+                'strategy_used': 'none',
+                'description': 'Repacking result causes overflow'
+            }
+        
+        # Update environment with new positions  
         env.placed_positions = result['new_positions']
         # Rebuild height map
         env.height_map.reset()
         for (x, y, z), (l, w, h) in zip(result['new_positions'], env.placed_items):
-            env.height_map.update_region_absolute(x, y, l, w, z + h)
+            new_height = min(z + h, env.H)  # Safety cap
+            env.height_map.update_region_absolute(x, y, l, w, new_height)
     
     return result
 
