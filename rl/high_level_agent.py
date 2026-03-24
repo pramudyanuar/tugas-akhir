@@ -238,6 +238,36 @@ class HighLevelAgent(nn.Module):
         
         strategy = torch.argmax(strategy_logits).item()
         return strategy
+
+    def decode_macro_decision(self, strategy):
+        """
+        Decode high-level strategy index menjadi macro decision.
+
+        Returns:
+            dict: {
+                'orientation': int,
+                'zone_priority': str,
+                'allow_repacking': bool
+            }
+        """
+        orientation = min(max(int(strategy), 0), 5)
+
+        # Mapping sederhana orientation -> zone priority agar high-level decision
+        # memengaruhi urutan candidate yang dievaluasi low-level policy.
+        zone_map = {
+            0: 'left_to_right',
+            1: 'right_to_left',
+            2: 'front_to_back',
+            3: 'back_to_front',
+            4: 'center',
+            5: 'center',
+        }
+
+        return {
+            'orientation': orientation,
+            'zone_priority': zone_map.get(orientation, 'center'),
+            'allow_repacking': int(strategy) == 6
+        }
     
     def get_item_ordering(self, items, strategy):
         """

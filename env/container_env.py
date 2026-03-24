@@ -11,6 +11,7 @@ from action_mask import ActionMask
 # Import dari parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dataset.random_generator import RandomGenerator
+from dataset.cutting_stock import CuttingStockGenerator
 from planning.repack import attempt_repack
 
 
@@ -20,7 +21,7 @@ class ContainerEnv:
     """
     
     def __init__(self, container_length=59, container_width=23, container_height=23,
-                 max_items=50, seed=None):
+                 max_items=50, seed=None, dataset_type='random'):
         """
         Initialize container environment.
         
@@ -30,15 +31,20 @@ class ContainerEnv:
             container_height (int): Tinggi container
             max_items (int): Maksimum jumlah items per episode
             seed (int): Random seed untuk reproducibility
+            dataset_type (str): 'random' atau 'cutting_stock'
         """
         self.L = container_length
         self.W = container_width
         self.H = container_height
         self.max_items = max_items
+        self.dataset_type = dataset_type
         
         self.height_map = HeightMap(self.L, self.W, self.H)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
-        self.dataset_generator = RandomGenerator(seed=seed)
+        if dataset_type == 'cutting_stock':
+            self.dataset_generator = CuttingStockGenerator(seed=seed)
+        else:
+            self.dataset_generator = RandomGenerator(seed=seed)
         
         self.items = []
         self.current_index = 0

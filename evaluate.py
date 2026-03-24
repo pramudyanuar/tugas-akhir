@@ -1,13 +1,16 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 import sys
 import os
+import csv
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from env.container_env import ContainerEnv
 from env.lbcp import is_stable
+from env.candidate_generator import CandidateGenerator
 from rl.high_level_agent import HighLevelAgent
 from rl.low_level_agent import LowLevelAgent
 from planning.mcts import MCTS
@@ -43,6 +46,11 @@ class EvaluationMetrics:
         self.episodes_success_rate = []
         self.episodes_cog_deviation = []
         self.episodes_reward = []
+        self.episodes_rearrange_attempts = []
+        self.episodes_rearrange_success_rate = []
+        self.episodes_rearrange_apply_rate = []
+        self.episodes_avg_rearrange_value = []
+        self.episodes_avg_unpack_depth = []
     
     def compute_volume_utilization(self, placed_items):
         """
@@ -239,39 +247,103 @@ class EvaluationMetrics:
             dict: Complete evaluation metrics untuk episode
         """
         state, action_mask = env.reset()
+        candidate_generator = CandidateGenerator(env.L, env.W)
         
         total_items = len(env.items)
         episode_reward = 0.0
         step_count = 0
+        rearrange_attempts = 0
+        rearrange_success = 0
+        rearrange_applied = 0
+        rearrange_value_sum = 0.0
+        rearrange_depth_sum = 0.0
         
         while step_count < total_items * 2:  # Max steps = 2x items
+            if env.current_index >= total_items:
+                break
+
             # High-level decision
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
             high_output = model_high(state_tensor)
             strategy = model_high.select_strategy(high_output['strategy_logits'])
-            
-            # Optional: Use MCTS untuk planning
-            if use_mcts:
-                mcts = MCTS(env, budget=num_simulations)
-                mcts_result = mcts.search(state, action_mask, depth_limit=10)
-                action = mcts_result['best_action']
+
+            macro_decision = model_high.decode_macro_decision(strategy)
+
+            # Candidate generation + feasibility masking
+            candidate_actions = candidate_generator.generate_from_macro(
+                action_mask,
+                macro_decision=macro_decision,
+                top_k=128
+            )
+
+            if len(candidate_actions) > 0:
+                # Low-level policy picks an action from candidate set
+                action = self._select_low_level_action(
+                    env,
+                    model_low,
+                    action_mask,
+                    candidate_actions
+                )
             else:
-                # Low-level decision
-                height_map_tensor = torch.FloatTensor(
-                    env.height_map.map
-                ).unsqueeze(0).unsqueeze(0)
-                
-                item = env.items[env.current_index] if env.current_index < len(env.items) else (1, 1, 1)
-                item_dim = torch.FloatTensor([item[0] / env.L, item[1] / env.W, item[2] / env.H]).unsqueeze(0)
-                
-                low_output = model_low(height_map_tensor, item_dim)
-                action_logits = low_output
-                
-                # Mask invalid actions
-                masked_logits = action_logits.clone()
-                masked_logits[0, action_mask == 0] = -float('inf')
-                
-                action = torch.argmax(masked_logits).item()
+                # Deadlock handling: try repack first (if allowed), then MCTS.
+                action = env.L * env.W  # default: skip action
+
+                if macro_decision.get('allow_repacking', False) and len(env.placed_items) > 0:
+                    env.perform_repack(strategy='load_balanced')
+                    state, action_mask = env._get_state_and_mask()
+                    candidate_actions = candidate_generator.generate_from_macro(
+                        action_mask,
+                        macro_decision=macro_decision,
+                        top_k=128
+                    )
+
+                    if len(candidate_actions) > 0:
+                        action = self._select_low_level_action(
+                            env,
+                            model_low,
+                            action_mask,
+                            candidate_actions
+                        )
+
+                if action == env.L * env.W and use_mcts:
+                    mcts = MCTS(env, budget=num_simulations)
+                    rearrange_attempts += 1
+                    rearr_result = mcts.search_rearrangement(
+                        failed_item=env.items[env.current_index]
+                        if env.current_index < len(env.items) else None,
+                        max_unpack=3,
+                        apply_to_env=True,
+                    )
+
+                    if rearr_result.get('success', False):
+                        rearrange_success += 1
+                    if rearr_result.get('applied', False):
+                        rearrange_applied += 1
+                    rearrange_value_sum += float(rearr_result.get('best_value', 0.0))
+                    rearrange_depth_sum += float(len(rearr_result.get('best_sequence', [])))
+
+                    if rearr_result.get('applied', False):
+                        state, action_mask = env._get_state_and_mask()
+                        candidate_actions = candidate_generator.generate_from_macro(
+                            action_mask,
+                            macro_decision=macro_decision,
+                            top_k=128
+                        )
+
+                        if len(candidate_actions) > 0:
+                            action = self._select_low_level_action(
+                                env,
+                                model_low,
+                                action_mask,
+                                candidate_actions
+                            )
+
+                    if action == env.L * env.W:
+                        mcts_result = mcts.search(state, action_mask, depth_limit=10)
+                        mcts_action = int(mcts_result['best_action'])
+
+                        if 0 <= mcts_action < len(action_mask) and action_mask[mcts_action] > 0:
+                            action = mcts_action
             
             # Execute action
             (next_state, next_mask), reward, done, info = env.step(action)
@@ -283,7 +355,7 @@ class EvaluationMetrics:
             
             if done:
                 break
-        
+
         # Compute all metrics
         utilization = self.compute_volume_utilization(env.placed_items)
         
@@ -308,6 +380,18 @@ class EvaluationMetrics:
         self.episodes_success_rate.append(success_rate)
         self.episodes_cog_deviation.append(load_dist['cog_deviation'])
         self.episodes_reward.append(episode_reward)
+
+        denom = max(rearrange_attempts, 1)
+        rearrange_success_rate = rearrange_success / denom
+        rearrange_apply_rate = rearrange_applied / denom
+        avg_rearrange_value = rearrange_value_sum / denom
+        avg_unpack_depth = rearrange_depth_sum / denom
+
+        self.episodes_rearrange_attempts.append(rearrange_attempts)
+        self.episodes_rearrange_success_rate.append(rearrange_success_rate)
+        self.episodes_rearrange_apply_rate.append(rearrange_apply_rate)
+        self.episodes_avg_rearrange_value.append(avg_rearrange_value)
+        self.episodes_avg_unpack_depth.append(avg_unpack_depth)
         
         return {
             'utilization': utilization,
@@ -321,8 +405,57 @@ class EvaluationMetrics:
             'episode_reward': episode_reward,
             'steps': step_count,
             'items_placed': len(env.placed_items),
-            'max_height': env.get_max_height()
+            'max_height': env.get_max_height(),
+            'rearrange_attempts': rearrange_attempts,
+            'rearrange_success_rate': rearrange_success_rate,
+            'rearrange_apply_rate': rearrange_apply_rate,
+            'avg_rearrange_value': avg_rearrange_value,
+            'avg_unpack_depth': avg_unpack_depth,
         }
+
+    def _select_low_level_action(self, env, model_low, action_mask, candidate_actions):
+        """
+        Select low-level action from candidate set using masked policy sampling.
+        """
+        height_map_tensor = torch.FloatTensor(env.height_map.map).unsqueeze(0).unsqueeze(0)
+        item = env.items[env.current_index] if env.current_index < len(env.items) else (1, 1, 1)
+        item_dim = torch.FloatTensor([item[0] / env.L, item[1] / env.W, item[2] / env.H]).unsqueeze(0)
+
+        with torch.no_grad():
+            logits = model_low(height_map_tensor, item_dim)
+
+        env_mask = torch.BoolTensor(np.asarray(action_mask) > 0).unsqueeze(0)
+        candidate_mask = torch.zeros_like(env_mask)
+        for action in candidate_actions:
+            if 0 <= action < env.L * env.W:
+                candidate_mask[0, action] = True
+
+        combined_mask = env_mask & candidate_mask
+
+        if not torch.any(combined_mask):
+            # Fallback: if no candidate survives, choose skip if valid.
+            skip_idx = env.L * env.W
+            if skip_idx < len(action_mask) and action_mask[skip_idx] > 0:
+                return skip_idx
+
+            valid_actions = np.where(np.asarray(action_mask) > 0)[0]
+            return int(valid_actions[0]) if len(valid_actions) > 0 else skip_idx
+
+        masked_logits = logits.clone()
+        masked_logits[~combined_mask] = float('-inf')
+
+        probs = F.softmax(masked_logits, dim=-1)
+        probs = torch.where(torch.isnan(probs), torch.zeros_like(probs), probs)
+
+        probs_sum = probs.sum(dim=-1, keepdim=True)
+        probs = torch.where(probs_sum > 0, probs / probs_sum, probs)
+
+        if torch.sum(probs) <= 0:
+            valid_idx = torch.where(combined_mask[0])[0]
+            return int(valid_idx[0].item()) if len(valid_idx) > 0 else env.L * env.W
+
+        action = torch.distributions.Categorical(probs).sample()
+        return int(action.item())
     
     def get_summary_statistics(self):
         """
@@ -347,6 +480,11 @@ class EvaluationMetrics:
             'std_cog_deviation': np.std(self.episodes_cog_deviation),
             'avg_reward': np.mean(self.episodes_reward),
             'std_reward': np.std(self.episodes_reward),
+            'avg_rearrange_attempts': np.mean(self.episodes_rearrange_attempts),
+            'avg_rearrange_success_rate': np.mean(self.episodes_rearrange_success_rate),
+            'avg_rearrange_apply_rate': np.mean(self.episodes_rearrange_apply_rate),
+            'avg_rearrange_value': np.mean(self.episodes_avg_rearrange_value),
+            'avg_unpack_depth': np.mean(self.episodes_avg_unpack_depth),
             'num_episodes': len(self.episodes_utilization)
         }
     
@@ -382,10 +520,64 @@ class EvaluationMetrics:
         print()
         print("Episode Reward:")
         print(f"  Mean: {stats['avg_reward']:.4f} ± {stats['std_reward']:.4f}")
+        print()
+        print("Rearrangement (MCTS):")
+        print(f"  Avg Attempts/Episode: {stats['avg_rearrange_attempts']:.2f}")
+        print(f"  Success Rate:         {stats['avg_rearrange_success_rate']:.2%}")
+        print(f"  Apply Rate:           {stats['avg_rearrange_apply_rate']:.2%}")
+        print(f"  Avg Rearrange Value:  {stats['avg_rearrange_value']:.4f}")
+        print(f"  Avg Unpack Depth:     {stats['avg_unpack_depth']:.2f}")
         print("=" * 70 + "\n")
 
+    def export_episode_metrics_csv(self, filepath):
+        """
+        Export per-episode metrics to CSV for reporting.
+        """
+        output_path = Path(filepath)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True):
+        fieldnames = [
+            'episode',
+            'utilization',
+            'load_balance',
+            'stability_rate',
+            'success_rate',
+            'cog_deviation',
+            'episode_reward',
+            'rearrange_attempts',
+            'rearrange_success_rate',
+            'rearrange_apply_rate',
+            'avg_rearrange_value',
+            'avg_unpack_depth',
+        ]
+
+        with output_path.open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            num_episodes = len(self.episodes_utilization)
+            for i in range(num_episodes):
+                writer.writerow({
+                    'episode': i + 1,
+                    'utilization': self.episodes_utilization[i],
+                    'load_balance': self.episodes_load_balance[i],
+                    'stability_rate': self.episodes_stability_rate[i],
+                    'success_rate': self.episodes_success_rate[i],
+                    'cog_deviation': self.episodes_cog_deviation[i],
+                    'episode_reward': self.episodes_reward[i],
+                    'rearrange_attempts': self.episodes_rearrange_attempts[i],
+                    'rearrange_success_rate': self.episodes_rearrange_success_rate[i],
+                    'rearrange_apply_rate': self.episodes_rearrange_apply_rate[i],
+                    'avg_rearrange_value': self.episodes_avg_rearrange_value[i],
+                    'avg_unpack_depth': self.episodes_avg_unpack_depth[i],
+                })
+
+        return str(output_path)
+
+
+def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
+             output_csv='logs/evaluation/evaluation_episode_metrics.csv',
+             dataset_type='random'):
     """
     Run evaluation dengan multiple episodes.
     
@@ -394,6 +586,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True):
         model_low: Low-level agent (if None, create default)
         num_episodes: Number of episodes to evaluate
         use_mcts: Whether to use MCTS planning
+        dataset_type: 'random' atau 'cutting_stock'
         
     Returns:
         dict: Evaluation results
@@ -409,7 +602,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True):
     
     # Run evaluation
     for episode in range(num_episodes):
-        env = ContainerEnv(max_items=20, seed=episode)
+        env = ContainerEnv(max_items=20, seed=episode, dataset_type=dataset_type)
         
         print(f"Evaluating episode {episode + 1}/{num_episodes}...", end=" ")
         result = evaluator.evaluate_episode(env, model_high, model_low, 
@@ -422,6 +615,9 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True):
     
     # Print summary
     evaluator.print_summary()
+
+    csv_path = evaluator.export_episode_metrics_csv(output_csv)
+    print(f"Episode metrics CSV saved: {csv_path}")
     
     return evaluator.get_summary_statistics()
 

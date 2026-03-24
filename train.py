@@ -1,14 +1,19 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 import sys
 import os
+import csv
 from pathlib import Path
 
 # Add workspace to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from env.container_env import ContainerEnv
+from env.candidate_generator import CandidateGenerator
+from rl.high_level_agent import HighLevelAgent
 from rl.ppo import PPO
+from planning.mcts import MCTS
 from utils.metrics import Metrics
 
 
@@ -94,11 +99,154 @@ class TrainingLoop:
         self.n_steps = n_steps
         self.device = device
         self.seed = seed
+
+        # Hierarchical components for macro decision + candidate selection.
+        self.high_level_agent = HighLevelAgent(input_dim=env.state_size).to(device)
+        self.high_level_agent.eval()
+        self.candidate_generator = CandidateGenerator(env.L, env.W)
+        self.mcts_budget = 20
         
         self.logger = TrainingLogger()
+        self.rearrange_stats = {
+            'deadlocks': 0,
+            'rearrange_attempts': 0,
+            'rearrange_success': 0,
+            'rearrange_applied': 0,
+            'rearrange_best_value_sum': 0.0,
+            'rearrange_unpack_depth_sum': 0.0,
+            'mcts_fallback_used': 0,
+        }
         
         self.total_steps = 0
         self.episode_count = 0
+
+    def _select_hierarchical_action(self, state, action_mask):
+        """
+        Select action with hierarchical control:
+        1) High-level macro decision
+        2) Candidate set generation + masking
+        3) Low-level (PPO) action selection
+        4) Deadlock handling via repack/MCTS fallback
+
+        Returns:
+            tuple: (action, log_prob, value, effective_action_mask)
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            high_output = self.high_level_agent(state_tensor)
+
+        strategy = self.high_level_agent.select_strategy(high_output['strategy_logits'])
+        macro_decision = self.high_level_agent.decode_macro_decision(strategy)
+
+        # Candidate generation from macro decision.
+        candidate_actions = self.candidate_generator.generate_from_macro(
+            action_mask,
+            macro_decision=macro_decision,
+            top_k=128
+        )
+
+        effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+        if len(candidate_actions) > 0:
+            for idx in candidate_actions:
+                if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                    effective_mask[idx] = 1.0
+
+        if np.sum(effective_mask[:-1]) > 0:
+            action, log_prob, value = self.ppo.select_action(state, effective_mask)
+            return action, log_prob, value, effective_mask
+
+        self.rearrange_stats['deadlocks'] += 1
+
+        # Deadlock handling: optional repack if no candidate position exists.
+        if macro_decision.get('allow_repacking', False) and len(self.env.placed_items) > 0:
+            repack_result = self.env.perform_repack(strategy='load_balanced')
+            if repack_result.get('success', False):
+                # Recompute state and mask after repacking.
+                state, action_mask = self.env._get_state_and_mask()
+                candidate_actions = self.candidate_generator.generate_from_macro(
+                    action_mask,
+                    macro_decision=macro_decision,
+                    top_k=128
+                )
+                effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+                for idx in candidate_actions:
+                    if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                        effective_mask[idx] = 1.0
+
+                if np.sum(effective_mask[:-1]) > 0:
+                    action, log_prob, value = self.ppo.select_action(state, effective_mask)
+                    return action, log_prob, value, effective_mask
+
+        # If still deadlocked, use MCTS as planner fallback.
+        mcts = MCTS(self.env, budget=self.mcts_budget)
+        self.rearrange_stats['rearrange_attempts'] += 1
+        rearr_result = mcts.search_rearrangement(
+            failed_item=self.env.items[self.env.current_index]
+            if self.env.current_index < len(self.env.items) else None,
+            max_unpack=3,
+            apply_to_env=True,
+        )
+
+        if rearr_result.get('success', False):
+            self.rearrange_stats['rearrange_success'] += 1
+        if rearr_result.get('applied', False):
+            self.rearrange_stats['rearrange_applied'] += 1
+        self.rearrange_stats['rearrange_best_value_sum'] += float(rearr_result.get('best_value', 0.0))
+        self.rearrange_stats['rearrange_unpack_depth_sum'] += float(len(rearr_result.get('best_sequence', [])))
+
+        if rearr_result.get('applied', False):
+            state, action_mask = self.env._get_state_and_mask()
+            candidate_actions = self.candidate_generator.generate_from_macro(
+                action_mask,
+                macro_decision=macro_decision,
+                top_k=128
+            )
+            effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+            for idx in candidate_actions:
+                if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                    effective_mask[idx] = 1.0
+
+            if np.sum(effective_mask[:-1]) > 0:
+                action, log_prob, value = self.ppo.select_action(state, effective_mask)
+                return action, log_prob, value, effective_mask
+
+        mcts_result = mcts.search(state, action_mask, depth_limit=5)
+        self.rearrange_stats['mcts_fallback_used'] += 1
+        mcts_action = int(mcts_result['best_action'])
+
+        # Ensure selected action is legal.
+        if 0 <= mcts_action < len(action_mask) and action_mask[mcts_action] > 0:
+            action = mcts_action
+        else:
+            valid_actions = np.where(np.asarray(action_mask) > 0)[0]
+            action = int(valid_actions[0]) if len(valid_actions) > 0 else self.env.L * self.env.W
+
+        # Compute log_prob and value for the chosen fallback action.
+        log_prob, value = self._compute_logprob_value_for_action(state, action_mask, action)
+        return action, log_prob, value, np.asarray(action_mask, dtype=np.float32)
+
+    def _compute_logprob_value_for_action(self, state, action_mask, action):
+        """Compute log probability and value for a fixed action under current PPO policy."""
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            logits, value = self.ppo.network(state_tensor)
+
+        masked_logits = self.ppo.mask_logits(logits, mask_tensor)
+        probs = F.softmax(masked_logits, dim=-1)
+        probs = torch.where(torch.isnan(probs), torch.zeros_like(probs), probs)
+
+        probs_sum = probs.sum(dim=-1, keepdim=True)
+        probs = torch.where(probs_sum > 0, probs / probs_sum, probs)
+
+        if probs[0, action] <= 0:
+            log_prob = torch.tensor(-20.0, device=self.device)
+        else:
+            log_prob = torch.log(probs[0, action] + 1e-12)
+
+        return log_prob.item(), value.item()
     
     def collect_steps(self, n_steps):
         """
@@ -125,8 +273,8 @@ class TrainingLoop:
             self.seed += 1  # Increment seed untuk variety
         
         while steps_collected < n_steps:
-            # Select action
-            action, log_prob, value = self.ppo.select_action(state, action_mask)
+            # Select action with hierarchical control.
+            action, log_prob, value, effective_mask = self._select_hierarchical_action(state, action_mask)
             
             # Take step in environment
             (next_state, next_mask), reward, done, info = self.env.step(action)
@@ -138,7 +286,7 @@ class TrainingLoop:
                 reward=reward,
                 value=value,
                 log_prob=log_prob,
-                action_mask=action_mask,
+                action_mask=effective_mask,
                 done=1.0 if done else 0.0
             )
             
@@ -177,7 +325,7 @@ class TrainingLoop:
         
         # Get next value untuk GAE bootstrap
         if not done:
-            _, _, next_value = self.ppo.select_action(state, action_mask)
+            _, _, next_value, _ = self._select_hierarchical_action(state, action_mask)
         else:
             next_value = 0.0
         
@@ -212,12 +360,26 @@ class TrainingLoop:
         print(f"Episode Length:      {stats.get('length_mean', 0):.1f} steps")
         print(f"Container Util:      {stats.get('utilization_mean', 0):.2f}%")
         print(f"Success Rate:        {stats.get('success_rate_mean', 0):.1f}%")
+
+        rearr_attempts = max(self.rearrange_stats['rearrange_attempts'], 1)
+        rearr_success_rate = 100.0 * self.rearrange_stats['rearrange_success'] / rearr_attempts
+        rearr_apply_rate = 100.0 * self.rearrange_stats['rearrange_applied'] / rearr_attempts
+        avg_rearr_value = self.rearrange_stats['rearrange_best_value_sum'] / rearr_attempts
+        avg_unpack_depth = self.rearrange_stats['rearrange_unpack_depth_sum'] / rearr_attempts
+
+        print(f"Deadlocks:            {self.rearrange_stats['deadlocks']}")
+        print(f"Rearrange Attempts:   {self.rearrange_stats['rearrange_attempts']}")
+        print(f"Rearrange Success:    {rearr_success_rate:.1f}%")
+        print(f"Rearrange Applied:    {rearr_apply_rate:.1f}%")
+        print(f"Avg Rearrange Value:  {avg_rearr_value:.4f}")
+        print(f"Avg Unpack Depth:     {avg_unpack_depth:.2f}")
+        print(f"MCTS Fallback Used:   {self.rearrange_stats['mcts_fallback_used']}")
         print(f"Total Steps:         {self.total_steps}")
         print(f"Total Episodes:      {self.episode_count}")
         print(f"{'='*70}\n")
 
 
-def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
+def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', dataset_type='random'):
     """
     Main training function.
     
@@ -227,6 +389,7 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
         max_items (int): Max items per episode
         seed (int): Random seed
         device (str): 'cpu' atau 'cuda'
+        dataset_type (str): 'random' atau 'cutting_stock'
     """
     print("\n" + "="*70)
     print("3D BIN PACKING WITH PPO TRAINING")
@@ -234,7 +397,7 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
     
     # Initialize environment
     print("Initializing environment...")
-    env = ContainerEnv(max_items=max_items, seed=seed)
+    env = ContainerEnv(max_items=max_items, seed=seed, dataset_type=dataset_type)
     state, action_mask = env.reset()
     
     state_size = env.state_size
@@ -244,6 +407,7 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
     print(f"  Action size: {action_size}")
     print(f"  Container: {env.L} x {env.W} x {env.H}")
     print(f"  Max items: {max_items}\n")
+    print(f"  Dataset type: {dataset_type}\n")
     
     # Initialize PPO agent
     print("Initializing PPO agent...")
@@ -270,9 +434,31 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
     )
     
     # Training loop
+    epoch_records = []
     try:
         for epoch in range(num_epochs):
             training_loop.train_epoch(num_epochs=3, log_frequency=1)
+
+            # Record per-epoch summary for CSV reporting.
+            stats = training_loop.logger.get_stats()
+            rearr_attempts = max(training_loop.rearrange_stats['rearrange_attempts'], 1)
+            epoch_records.append({
+                'epoch': epoch + 1,
+                'reward_mean_last100': stats.get('reward_mean', 0.0),
+                'reward_std_last100': stats.get('reward_std', 0.0),
+                'length_mean_last100': stats.get('length_mean', 0.0),
+                'utilization_mean_last100': stats.get('utilization_mean', 0.0),
+                'success_rate_mean_last100': stats.get('success_rate_mean', 0.0),
+                'deadlocks': training_loop.rearrange_stats['deadlocks'],
+                'rearrange_attempts': training_loop.rearrange_stats['rearrange_attempts'],
+                'rearrange_success_rate': training_loop.rearrange_stats['rearrange_success'] / rearr_attempts,
+                'rearrange_apply_rate': training_loop.rearrange_stats['rearrange_applied'] / rearr_attempts,
+                'avg_rearrange_value': training_loop.rearrange_stats['rearrange_best_value_sum'] / rearr_attempts,
+                'avg_unpack_depth': training_loop.rearrange_stats['rearrange_unpack_depth_sum'] / rearr_attempts,
+                'mcts_fallback_used': training_loop.rearrange_stats['mcts_fallback_used'],
+                'total_steps': training_loop.total_steps,
+                'total_episodes': training_loop.episode_count,
+            })
             
             # Save checkpoint
             if (epoch + 1) % 5 == 0:
@@ -296,6 +482,16 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu'):
     print(f"  Average Success:   {stats.get('success_rate_mean', 0):.1f}%")
     print(f"  Total Steps:       {training_loop.total_steps}")
     print(f"  Total Episodes:    {training_loop.episode_count}\n")
+
+    # Export epoch summary metrics to CSV.
+    csv_path = Path('logs/training/training_epoch_metrics.csv')
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    if epoch_records:
+        with csv_path.open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(epoch_records[0].keys()))
+            writer.writeheader()
+            writer.writerows(epoch_records)
+        print(f"Training metrics CSV saved: {csv_path}")
     
     return training_loop, ppo
 
