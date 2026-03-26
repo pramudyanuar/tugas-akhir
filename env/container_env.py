@@ -2,11 +2,10 @@ import numpy as np
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from height_map import HeightMap
-from lbcp import is_stable
-from action_mask import ActionMask
+# Use relative imports for clean module structure
+from .height_map import HeightMap
+from .lbcp import is_stable
+from .action_mask import ActionMask
 
 # Import dari parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

@@ -2,11 +2,9 @@ import numpy as np
 import sys
 import os
 
-# Add parent directory to path untuk import
-sys.path.insert(0, os.path.dirname(__file__))
-
-from height_map import HeightMap
-from lbcp import is_stable
+# Use relative imports for clean module structure
+from .height_map import HeightMap
+from .lbcp import is_stable
 
 
 class ActionMask:

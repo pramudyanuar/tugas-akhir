@@ -44,7 +44,8 @@ class ContainerVisualizer:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
         
         # Plot 1: Height heatmap
-        im = ax1.imshow(height_map.T, cmap='YlOrRd', origin='lower')
+        height_data = height_map.map if hasattr(height_map, 'map') else height_map
+        im = ax1.imshow(height_data.T, cmap='YlOrRd', origin='lower')
         ax1.set_xlabel(f'Length (0-{self.L})')
         ax1.set_ylabel(f'Width (0-{self.W})')
         ax1.set_title('Height Map (Top View)')

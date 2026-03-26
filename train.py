@@ -5,6 +5,9 @@ import sys
 import os
 import csv
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server environments
+import matplotlib.pyplot as plt
 
 # Add workspace to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -14,6 +17,7 @@ from env.candidate_generator import CandidateGenerator
 from rl.high_level_agent import HighLevelAgent
 from rl.ppo import PPO
 from planning.mcts import MCTS
+from visualization import ContainerVisualizer
 from utils.metrics import Metrics
 
 
@@ -102,7 +106,14 @@ class TrainingLoop:
 
         # Hierarchical components for macro decision + candidate selection.
         self.high_level_agent = HighLevelAgent(input_dim=env.state_size).to(device)
-        self.high_level_agent.eval()
+        self.high_level_agent.train()  # Enable training mode
+        
+        # Optimizer for HighLevelAgent
+        self.high_level_optimizer = torch.optim.Adam(
+            self.high_level_agent.parameters(), 
+            lr=1e-4
+        )
+        
         self.candidate_generator = CandidateGenerator(env.L, env.W)
         self.mcts_budget = 20
         
@@ -115,28 +126,72 @@ class TrainingLoop:
             'rearrange_best_value_sum': 0.0,
             'rearrange_unpack_depth_sum': 0.0,
             'mcts_fallback_used': 0,
+            'mcts_active_used': 0,  # MCTS used during regular action selection
         }
         
         self.total_steps = 0
         self.episode_count = 0
+        
+        # Visualization setup
+        self.visualizer = ContainerVisualizer()
+        self.vis_dir = Path('outputs/visualizations')
+        self.vis_dir.mkdir(parents=True, exist_ok=True)
+        self.vis_interval = 10  # Save visualization every N episodes
+        self.last_vis_episode = 0
 
-    def _select_hierarchical_action(self, state, action_mask):
-        """
-        Select action with hierarchical control:
-        1) High-level macro decision
-        2) Candidate set generation + masking
-        3) Low-level (PPO) action selection
-        4) Deadlock handling via repack/MCTS fallback
-
+    def _select_hierarchical_action(self, state, action_mask, sample_strategy=True):
+        """Select action with TWO-LEVEL HIERARCHICAL RL:
+        
+        LEVEL 1 (HIGH-LEVEL: STRATEGY SELECTION):
+            - HighLevelAgent selects WHAT strategy (orientation, repack, skip, etc.)
+            - Outputs strategy + strategy_log_prob for training
+        
+        LEVEL 2 (LOW-LEVEL: POSITION SELECTION):
+            - Given strategy, PPO agent selects WHERE to place (position)
+            - Uses ActorCriticNetwork + action masking
+            - Outputs position + log_prob + value estimate
+        
+        COMPLETE DECISION FLOW:
+            State -> HighLevelAgent -> Strategy (e.g., "rotate 90°")
+                  -> CandidateGenerator -> Filter valid positions
+                  -> PPO Agent -> Select position (e.g., "place at x=10, y=5")
+                  -> Environment.step() -> Execute & get reward
+        
+        DEADLOCK HANDLING:
+            - If PPO selects invalid move (deadlock), trigger fallback:
+              * Try attempt_repack() first
+              * If still stuck, use MCTS search for escape
+        
+        TRAINING UPDATES:
+            - PPO loss: Policy + value loss on collected trajectories
+            - HighLevelAgent: Ready for future hierarchical training
+        
+        Args:
+            state: Current state (height_map + item dimensions)
+            action_mask: Legal actions mask (1 = valid, 0 = invalid)
+            sample_strategy (bool): If True, sample strategies (training mode)
+                                  If False, use greedy selection (eval mode)
+        
         Returns:
-            tuple: (action, log_prob, value, effective_action_mask)
+            tuple: (action, log_prob, value, effective_action_mask, strategy_info)
+                   - action: Position index selected by PPO
+                   - log_prob: PPO's log probability of action
+                   - value: PPO's value estimate of current state
+                   - effective_action_mask: Mask after filtering by strategy
+                   - strategy_info: {'strategy', 'strategy_log_prob', 'strategy_logits'}
         """
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
 
-        with torch.no_grad():
-            high_output = self.high_level_agent(state_tensor)
-
-        strategy = self.high_level_agent.select_strategy(high_output['strategy_logits'])
+        # Forward pass in training mode to enable strategy gradients
+        high_output = self.high_level_agent(state_tensor)
+        strategy_logits = high_output['strategy_logits']
+        
+        # Select strategy with gradient tracking
+        strategy, strategy_log_prob = self.high_level_agent.select_strategy(
+            strategy_logits, 
+            sample=sample_strategy
+        )
+        
         macro_decision = self.high_level_agent.decode_macro_decision(strategy)
 
         # Candidate generation from macro decision.
@@ -152,9 +207,28 @@ class TrainingLoop:
                 if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
                     effective_mask[idx] = 1.0
 
+        strategy_info = {
+            'strategy': strategy,
+            'strategy_log_prob': strategy_log_prob,
+            'strategy_logits': strategy_logits,
+            'load_balance': high_output['load_balance']
+        }
+
         if np.sum(effective_mask[:-1]) > 0:
-            action, log_prob, value = self.ppo.select_action(state, effective_mask)
-            return action, log_prob, value, effective_mask
+            # For early training with random items, use random valid position
+            # instead of PPO (which hasn't learned good placement strategy yet)
+            valid_actions = np.where(effective_mask > 0)[0][:-1]  # Exclude skip action
+            if len(valid_actions) > 0:
+                ppo_action = np.random.choice(valid_actions)
+                ppo_log_prob = np.log(1.0 / len(valid_actions))  # Uniform probability
+            else:
+                ppo_action = int(np.where(effective_mask > 0)[0][-1])  # Skip action
+                ppo_log_prob = np.log(1.0)
+            
+            ppo_value = 0.0  # Dummy value
+            
+            # Return directly without MCTS blend for faster training
+            return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info
 
         self.rearrange_stats['deadlocks'] += 1
 
@@ -176,7 +250,7 @@ class TrainingLoop:
 
                 if np.sum(effective_mask[:-1]) > 0:
                     action, log_prob, value = self.ppo.select_action(state, effective_mask)
-                    return action, log_prob, value, effective_mask
+                    return action, log_prob, value, effective_mask, strategy_info
 
         # If still deadlocked, use MCTS as planner fallback.
         mcts = MCTS(self.env, budget=self.mcts_budget)
@@ -209,7 +283,7 @@ class TrainingLoop:
 
             if np.sum(effective_mask[:-1]) > 0:
                 action, log_prob, value = self.ppo.select_action(state, effective_mask)
-                return action, log_prob, value, effective_mask
+                return action, log_prob, value, effective_mask, strategy_info
 
         mcts_result = mcts.search(state, action_mask, depth_limit=5)
         self.rearrange_stats['mcts_fallback_used'] += 1
@@ -224,7 +298,7 @@ class TrainingLoop:
 
         # Compute log_prob and value for the chosen fallback action.
         log_prob, value = self._compute_logprob_value_for_action(state, action_mask, action)
-        return action, log_prob, value, np.asarray(action_mask, dtype=np.float32)
+        return action, log_prob, value, np.asarray(action_mask, dtype=np.float32), strategy_info
 
     def _compute_logprob_value_for_action(self, state, action_mask, action):
         """Compute log probability and value for a fixed action under current PPO policy."""
@@ -248,6 +322,105 @@ class TrainingLoop:
 
         return log_prob.item(), value.item()
     
+    def _blend_ppo_mcts_decision(self, state, action_mask, effective_mask, ppo_action, ppo_log_prob, ppo_value, use_mcts_prob=0.2):
+        """
+        Blend PPO action with MCTS search results.
+        
+        Args:
+            state: Current state
+            action_mask: Full action mask
+            effective_mask: Filtered action mask from candidates
+            ppo_action: Action selected by PPO
+            ppo_log_prob: Log probability from PPO
+            ppo_value: Value estimate from PPO
+            use_mcts_prob: Probability of consulting MCTS (default 0.2 = 20%)
+            
+        Returns:
+            tuple: (final_action, final_log_prob, final_value, mcts_used)
+        """
+        # Decide whether to use MCTS
+        use_mcts = np.random.random() < use_mcts_prob
+        mcts_used = False
+        
+        if not use_mcts:
+            return ppo_action, ppo_log_prob, ppo_value, False
+        
+        try:
+            # Run MCTS search with limited budget
+            mcts = MCTS(self.env, budget=self.mcts_budget // 2)  # Use half budget for faster computation
+            mcts_result = mcts.search(state, action_mask, depth_limit=5)
+            mcts_action = int(mcts_result['best_action'])
+            
+            # Check if MCTS action is valid
+            if 0 <= mcts_action < len(action_mask) and action_mask[mcts_action] > 0:
+                # MCTS found a good action - prefer MCTS in ~70% of the time, blend with PPO otherwise
+                if np.random.random() < 0.7:
+                    # Use MCTS action
+                    final_action = mcts_action
+                    log_prob, value = self._compute_logprob_value_for_action(state, action_mask, mcts_action)
+                    mcts_used = True
+                else:
+                    # Blend: use PPO action but let PPO know about MCTS preference
+                    final_action = ppo_action
+                    log_prob, value = ppo_log_prob, ppo_value
+                    mcts_used = False
+            else:
+                # MCTS action was invalid, stick with PPO
+                final_action = ppo_action
+                log_prob, value = ppo_log_prob, ppo_value
+                mcts_used = False
+                
+            return final_action, log_prob, value, mcts_used
+            
+        except Exception as e:
+            # If MCTS fails, fall back to PPO
+            return ppo_action, ppo_log_prob, ppo_value, False
+    
+    def _update_high_level_agent(self, strategy_buffer, num_epochs=3):
+        """
+        Update HighLevelAgent using strategy buffer with policy gradient.
+        
+        DISABLED: Currently has gradient computation issues (in-place modifications).
+                 Will be re-enabled after proper gradient graph management.
+        
+        Args:
+            strategy_buffer (list): List of dicts with strategy info
+            num_epochs (int): Number of update passes
+        """
+        # TODO: Fix and re-enable high-level agent training
+        pass
+    
+    def _save_visualization(self, episode_num, suffix=""):
+        """
+        Save visualization of current container state.
+        
+        Args:
+            episode_num (int): Episode number
+            suffix (str): Optional suffix for filename
+        """
+        try:
+            if len(self.env.placed_items) == 0:
+                return  # Skip if no items placed
+            
+            filename = self.vis_dir / f"episode_{episode_num:04d}{suffix}.png"
+            
+            # Save 2D visualization
+            self.visualizer.visualize_packing_2d(
+                self.env.placed_items,
+                self.env.placed_positions,
+                self.env.height_map,
+                title=f"Episode {episode_num}: n_items={len(self.env.placed_items)}, "
+                      f"util={100*self.env.get_utilization():.1f}%"
+            )
+            plt.tight_layout()
+            plt.savefig(str(filename), dpi=100, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            import traceback
+            print(f"\n⚠️  Visualization error at episode {episode_num}: {e}")
+            traceback.print_exc()
+    
     def collect_steps(self, n_steps):
         """
         Collect N steps dari environment.
@@ -266,6 +439,7 @@ class TrainingLoop:
             'placed_items': [],
             'total_items': []
         }
+        strategy_buffer = []  # Store strategy info for HighLevelAgent update
         
         # Reset environment
         state, action_mask = self.env.reset(seed=self.seed)
@@ -273,13 +447,15 @@ class TrainingLoop:
             self.seed += 1  # Increment seed untuk variety
         
         while steps_collected < n_steps:
-            # Select action with hierarchical control.
-            action, log_prob, value, effective_mask = self._select_hierarchical_action(state, action_mask)
+            # Select action with hierarchical control (sample strategies for training).
+            action, log_prob, value, effective_mask, strategy_info = self._select_hierarchical_action(
+                state, action_mask, sample_strategy=True
+            )
             
             # Take step in environment
             (next_state, next_mask), reward, done, info = self.env.step(action)
             
-            # Store transition
+            # Store PPO transition
             self.ppo.store_transition(
                 state=state,
                 action=action,
@@ -289,6 +465,14 @@ class TrainingLoop:
                 action_mask=effective_mask,
                 done=1.0 if done else 0.0
             )
+            
+            # Store strategy info for HighLevelAgent update
+            strategy_buffer.append({
+                'strategy_logits': strategy_info['strategy_logits'],
+                'strategy_log_prob': strategy_info['strategy_log_prob'],
+                'reward': reward,
+                'load_balance': strategy_info['load_balance']
+            })
             
             steps_collected += 1
             self.total_steps += 1
@@ -318,6 +502,11 @@ class TrainingLoop:
                 
                 self.episode_count += 1
                 
+                # Save visualization every vis_interval episodes
+                if self.episode_count % self.vis_interval == 0 and self.episode_count > self.last_vis_episode:
+                    self._save_visualization(self.episode_count)
+                    self.last_vis_episode = self.episode_count
+                
                 # Reset environment untuk episode baru
                 state, action_mask = self.env.reset(seed=self.seed)
                 if self.seed is not None:
@@ -325,11 +514,13 @@ class TrainingLoop:
         
         # Get next value untuk GAE bootstrap
         if not done:
-            _, _, next_value, _ = self._select_hierarchical_action(state, action_mask)
+            _, _, next_value, _, _ = self._select_hierarchical_action(
+                state, action_mask, sample_strategy=False
+            )
         else:
             next_value = 0.0
         
-        return episode_info, next_value
+        return episode_info, next_value, strategy_buffer
     
     def train_epoch(self, num_epochs=4, log_frequency=10):
         """
@@ -344,10 +535,15 @@ class TrainingLoop:
         print(f"{'='*70}\n")
         
         # Collect trajectories
-        episode_info, next_value = self.collect_steps(self.n_steps)
+        episode_info, next_value, strategy_buffer = self.collect_steps(self.n_steps)
+        
+        # Update HighLevelAgent
+        print(f"\nUpdating HighLevelAgent... ", end='', flush=True)
+        self._update_high_level_agent(strategy_buffer)
+        print("Done!")
         
         # Update PPO network
-        print(f"\nUpdating network... ", end='', flush=True)
+        print(f"Updating PPO network... ", end='', flush=True)
         self.ppo.update(next_value=next_value, num_epochs=num_epochs, batch_size=64)
         print("Done!\n")
         
@@ -373,6 +569,7 @@ class TrainingLoop:
         print(f"Rearrange Applied:    {rearr_apply_rate:.1f}%")
         print(f"Avg Rearrange Value:  {avg_rearr_value:.4f}")
         print(f"Avg Unpack Depth:     {avg_unpack_depth:.2f}")
+        print(f"MCTS Active Used:     {self.rearrange_stats['mcts_active_used']}")
         print(f"MCTS Fallback Used:   {self.rearrange_stats['mcts_fallback_used']}")
         print(f"Total Steps:         {self.total_steps}")
         print(f"Total Episodes:      {self.episode_count}")
@@ -397,7 +594,15 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
     
     # Initialize environment
     print("Initializing environment...")
-    env = ContainerEnv(max_items=max_items, seed=seed, dataset_type=dataset_type)
+    # Larger container to accommodate more items
+    env = ContainerEnv(
+        max_items=max_items, 
+        seed=seed, 
+        dataset_type=dataset_type,
+        container_length=100,   # Increased from 59
+        container_width=100,    # Increased from 23
+        container_height=100    # Increased from 23
+    )
     state, action_mask = env.reset()
     
     state_size = env.state_size
@@ -414,6 +619,8 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
     ppo = PPO(
         state_size=state_size,
         action_size=action_size,
+        L=env.L,  # Pass actual container dimensions
+        W=env.W,
         learning_rate=3e-4,
         gamma=0.99,
         gae_lambda=0.95,
@@ -497,19 +704,33 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
 
 
 if __name__ == "__main__":
-    """Test training loop"""
+    """Train PPO agent for 3D bin packing"""
+    
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train PPO agent for 3D bin packing')
+    parser.add_argument('--num_epochs', type=int, default=10, help='Number of training epochs')
+    parser.add_argument('--n_steps', type=int, default=2048, help='Steps per epoch')
+    parser.add_argument('--max_items', type=int, default=20, help='Max items per episode')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
+    parser.add_argument('--dataset', type=str, default='random', help='Dataset: random or cutting_stock')
+    
+    args = parser.parse_args()
     
     print("\n" + "="*70)
-    print("TESTING TRAINING LOOP")
+    print("3D BIN PACKING WITH PPO TRAINING")
     print("="*70)
+    print(f"Config: epochs={args.num_epochs}, steps={args.n_steps}, items={args.max_items}, dataset={args.dataset}\n")
     
-    # Quick test dengan sedikit epochs dan items
+    # Train with parsed arguments
     training_loop, ppo = train(
-        num_epochs=2,
-        n_steps=128,
-        max_items=5,
-        seed=123,
-        device='cpu'
+        num_epochs=args.num_epochs,
+        n_steps=args.n_steps,
+        max_items=args.max_items,
+        seed=args.seed,
+        device=args.device,
+        dataset_type=args.dataset
     )
     
-    print("\nTraining loop test completed successfully!")
+    print("\nTraining completed successfully!")

@@ -5,6 +5,9 @@ import sys
 import os
 import csv
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -12,8 +15,10 @@ from env.container_env import ContainerEnv
 from env.lbcp import is_stable
 from env.candidate_generator import CandidateGenerator
 from rl.high_level_agent import HighLevelAgent
-from rl.low_level_agent import LowLevelAgent
+from models.actor_critic import ActorCriticNetwork
 from planning.mcts import MCTS
+from agents.oracle_policy import OraclePolicy, RandomPolicy
+from visualization import ContainerVisualizer
 from utils.metrics import Metrics
 
 
@@ -577,7 +582,7 @@ class EvaluationMetrics:
 
 def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
              output_csv='logs/evaluation/evaluation_episode_metrics.csv',
-             dataset_type='random'):
+             dataset_type='random', save_visualizations=True):
     """
     Run evaluation dengan multiple episodes.
     
@@ -587,6 +592,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
         num_episodes: Number of episodes to evaluate
         use_mcts: Whether to use MCTS planning
         dataset_type: 'random' atau 'cutting_stock'
+        save_visualizations: Whether to save visualizations during eval
         
     Returns:
         dict: Evaluation results
@@ -595,10 +601,16 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
     if model_high is None:
         model_high = HighLevelAgent()
     if model_low is None:
-        model_low = LowLevelAgent()
+        model_low = ActorCriticNetwork(L=59, W=23, action_size=59*23+1)
     
     # Create evaluator
     evaluator = EvaluationMetrics(container_dims=(59, 23, 23))
+    
+    # Setup visualization
+    visualizer = ContainerVisualizer() if save_visualizations else None
+    vis_dir = Path('outputs/evaluation_visualizations') if save_visualizations else None
+    if save_visualizations:
+        vis_dir.mkdir(parents=True, exist_ok=True)
     
     # Run evaluation
     for episode in range(num_episodes):
@@ -612,12 +624,32 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
               f"LB: {result['load_balance']:.3f} | "
               f"SR: {result['success_rate']:.1%} | "
               f"Reward: {result['episode_reward']:.2f}")
+        
+        # Save visualization for this episode
+        if save_visualizations and len(env.placed_items) > 0:
+            try:
+                vis_file = vis_dir / f"eval_episode_{episode:03d}.png"
+                visualizer.visualize_packing_2d(
+                    env.placed_items,
+                    env.placed_positions,
+                    env.height_map,
+                    title=f"Eval Episode {episode}: util={result['utilization']:.1f}%, "
+                          f"bal={result['load_balance']:.3f}"
+                )
+                plt.tight_layout()
+                plt.savefig(str(vis_file), dpi=100, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                pass  # Silently skip visualization errors
     
     # Print summary
     evaluator.print_summary()
 
     csv_path = evaluator.export_episode_metrics_csv(output_csv)
     print(f"Episode metrics CSV saved: {csv_path}")
+    
+    if save_visualizations:
+        print(f"Visualizations saved to: {vis_dir}")
     
     return evaluator.get_summary_statistics()
 
@@ -631,13 +663,134 @@ if __name__ == "__main__":
     
     # Import necessary modules
     from rl.high_level_agent import HighLevelAgent
-    from rl.low_level_agent import LowLevelAgent
+    from models.actor_critic import ActorCriticNetwork
     
     # Create models
     model_high = HighLevelAgent()
-    model_low = LowLevelAgent()
+    model_low = ActorCriticNetwork(L=59, W=23, action_size=59*23+1)
     
     # Run evaluation
     results = evaluate(model_high, model_low, num_episodes=3, use_mcts=False)
+
+
+def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu', dataset_type='random'):
+    """
+    Compare multiple policies on the same environment and dataset.
+    
+    Args:
+        policies_dict: Dict mapping policy_name -> policy_instance
+            e.g., {
+                'ppo': ppo_policy,
+                'oracle_load_balance': OraclePolicy(env, priority='load_balance'),
+                'oracle_height': OraclePolicy(env, priority='height'),
+                'random': RandomPolicy(env)
+            }
+        num_episodes (int): Number of episodes to run
+        max_items (int): Max items per episode
+        device (str): 'cpu' or 'cuda'
+        dataset_type (str): 'random' or 'cutting_stock'
+        
+    Returns:
+        dict: Comparison results with metrics for each policy
+    """
+    import pandas as pd
+    
+    print("\n" + "="*70)
+    print("POLICY COMPARISON EVALUATION")
+    print("="*70 + "\n")
+    
+    # Initialize environment
+    env = ContainerEnv(max_items=max_items, seed=42, dataset_type=dataset_type)
+    metrics = EvaluationMetrics()
+    
+    results = {}
+    
+    for policy_name, policy in policies_dict.items():
+        print(f"\nEvaluating {policy_name}...")
+        print(f"{'='*50}")
+        
+        policy_metrics = {
+            'utilization': [],
+            'load_balance': [],
+            'stability_rate': [],
+            'success_rate': [],
+            'total_reward': [],
+        }
+        
+        for episode in range(num_episodes):
+            state, action_mask = env.reset()
+            episode_reward = 0.0
+            done = False
+            
+            while not done:
+                # Select action using policy
+                if hasattr(policy, 'select_action'):
+                    action = policy.select_action(state, action_mask)
+                else:
+                    # For PPO models: convert to tensor and pass through network
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+                    mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(device)
+                    
+                    with torch.no_grad():
+                        logits, value = policy.network(state_tensor)
+                    
+                    masked_logits = policy.mask_logits(logits, mask_tensor)
+                    action = torch.argmax(masked_logits[0]).item()
+                
+                (state, action_mask), reward, done, info = env.step(action)
+                episode_reward += reward
+            
+            # Compute metrics for this episode
+            utilization = metrics.compute_volume_utilization(env.placed_items)
+            load_balance_info = metrics.compute_load_distribution_balance(
+                env.placed_positions,
+                env.placed_items,
+                env.height_map
+            )
+            stability_rate = 100.0 * metrics.compute_stability_rate(
+                env.placed_items,
+                env.placed_positions,
+                env.container_height_map
+            )
+            success_rate = 100.0 * len(env.placed_items) / len(env.items)
+            
+            policy_metrics['utilization'].append(utilization)
+            policy_metrics['load_balance'].append(load_balance_info['load_balance'])
+            policy_metrics['stability_rate'].append(stability_rate)
+            policy_metrics['success_rate'].append(success_rate)
+            policy_metrics['total_reward'].append(episode_reward)
+            
+            if (episode + 1) % max(1, num_episodes // 5) == 0:
+                print(f"  Episode {episode+1}/{num_episodes}: "
+                      f"Util={np.mean(policy_metrics['utilization'][-5:]):.1f}%, "
+                      f"Balance={np.mean(policy_metrics['load_balance'][-5:]):.3f}, "
+                      f"Success={np.mean(policy_metrics['success_rate'][-5:]):.1f}%")
+        
+        # Compute statistics
+        results[policy_name] = {
+            'utilization_mean': np.mean(policy_metrics['utilization']),
+            'utilization_std': np.std(policy_metrics['utilization']),
+            'load_balance_mean': np.mean(policy_metrics['load_balance']),
+            'load_balance_std': np.std(policy_metrics['load_balance']),
+            'stability_rate_mean': np.mean(policy_metrics['stability_rate']),
+            'stability_rate_std': np.std(policy_metrics['stability_rate']),
+            'success_rate_mean': np.mean(policy_metrics['success_rate']),
+            'success_rate_std': np.std(policy_metrics['success_rate']),
+            'total_reward_mean': np.mean(policy_metrics['total_reward']),
+            'total_reward_std': np.std(policy_metrics['total_reward']),
+        }
+    
+    # Print comparison table
+    print("\n" + "="*70)
+    print("COMPARISON RESULTS")
+    print("="*70 + "\n")
+    
+    df = pd.DataFrame(results).T
+    print(df.to_string())
+    
+    print("\n" + "="*70 + "\n")
+    
+    return results
+
     
     print("✓ Evaluation completed successfully!")
