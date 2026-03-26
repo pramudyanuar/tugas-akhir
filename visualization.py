@@ -41,7 +41,10 @@ class ContainerVisualizer:
             height_map: 2D numpy array of heights
             title: Plot title
         """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        # Adjust figure size based on number of items
+        num_items = len(placed_items)
+        figsize = (16, 6) if num_items > 20 else (14, 5)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
         
         # Plot 1: Height heatmap
         height_data = height_map.map if hasattr(height_map, 'map') else height_map
@@ -59,20 +62,25 @@ class ContainerVisualizer:
         ax2.set_ylabel(f'Width (0-{self.W})')
         ax2.set_title('Item Placement (Top View)')
         
+        # Adjust font size based on number of items
+        fontsize = max(5, 10 - len(placed_items) // 10)
+        
         # Draw items
         for i, (item, pos) in enumerate(zip(placed_items, placed_positions)):
             l, w, h = item
             x, y, z = pos
             
             # Draw rectangle
-            rect = patches.Rectangle((x, y), l, w, linewidth=2, 
+            rect = patches.Rectangle((x, y), l, w, linewidth=1.5, 
                                     edgecolor='black', facecolor=self.colors[i % 20],
                                     alpha=0.7)
             ax2.add_patch(rect)
             
-            # Add label
-            ax2.text(x + l/2, y + w/2, f'{i+1}\n{l}×{w}×{h}', 
-                    ha='center', va='center', fontsize=8, fontweight='bold')
+            # Add label (only if item is large enough)
+            if l > 5 and w > 5:
+                ax2.text(x + l/2, y + w/2, f'{i+1}\n{l}×{w}×{h}', 
+                        ha='center', va='center', fontsize=fontsize, 
+                        fontweight='bold', color='white')
         
         # Draw border
         rect_border = patches.Rectangle((0, 0), self.L, self.W, linewidth=3,
@@ -80,7 +88,7 @@ class ContainerVisualizer:
         ax2.add_patch(rect_border)
         
         plt.suptitle(title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.92, bottom=0.1, wspace=0.3)
         return fig
     
     def visualize_packing_3d(self, placed_items, placed_positions, title="3D Container Packing"):
@@ -182,13 +190,16 @@ class ContainerVisualizer:
         Visualize cross-section views (XZ dan YZ planes).
         
         Args:
-            height_map: 2D numpy array of heights
+            height_map: 2D numpy array of heights or HeightMap object
             title: Plot title
         """
+        # Extract numpy array if HeightMap object
+        height_data = height_map.map if hasattr(height_map, 'map') else height_map
+        
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
         
         # XZ cross-section (along width at center)
-        xz_data = height_map[:, self.W//2:self.W//2+1].flatten()
+        xz_data = height_data[:, self.W//2:self.W//2+1].flatten()
         ax1.bar(range(len(xz_data)), xz_data, color='steelblue', edgecolor='black')
         ax1.fill_between(range(len(xz_data)), xz_data, alpha=0.3, color='steelblue')
         ax1.set_xlabel('Length Position')
@@ -198,7 +209,7 @@ class ContainerVisualizer:
         ax1.grid(axis='y', alpha=0.3)
         
         # YZ cross-section (along length at center)
-        yz_data = height_map[self.L//2:self.L//2+1, :].flatten()
+        yz_data = height_data[self.L//2:self.L//2+1, :].flatten()
         ax2.bar(range(len(yz_data)), yz_data, color='coral', edgecolor='black')
         ax2.fill_between(range(len(yz_data)), yz_data, alpha=0.3, color='coral')
         ax2.set_xlabel('Width Position')
@@ -208,7 +219,7 @@ class ContainerVisualizer:
         ax2.grid(axis='y', alpha=0.3)
         
         plt.suptitle(title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.92, bottom=0.1, wspace=0.3)
         return fig
     
     def visualize_statistics(self, placed_items, placed_positions, height_map, 
@@ -303,7 +314,7 @@ class ContainerVisualizer:
         ax.text(0.5, -0.15, f'{overall_score:.1%}', ha='center', fontsize=12, fontweight='bold')
         
         plt.suptitle(title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
+        plt.subplots_adjust(left=0.08, right=0.95, top=0.93, bottom=0.08, hspace=0.35, wspace=0.3)
         return fig
     
     def save_all_visualizations(self, env, output_dir='./visualizations'):

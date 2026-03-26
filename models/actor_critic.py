@@ -55,13 +55,17 @@ class ActorCriticNetwork(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 3, padding=1),
             nn.ReLU(),
+            nn.MaxPool2d(2),  # Reduce spatial dimensions
             nn.Conv2d(16, 32, 3, padding=1),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.MaxPool2d(2)   # Further reduce spatial dimensions
         )
         
         # FC layers: flattened conv output + item_dims (3) → hidden → [action logits, value]
+        # After 2x2 max pooling twice: spatial dims become (L//4, W//4)
+        pooled_size = 32 * (L // 4) * (W // 4) + 3
         self.fc_shared = nn.Sequential(
-            nn.Linear(32 * L * W + 3, hidden_size),
+            nn.Linear(pooled_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU()

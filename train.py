@@ -132,8 +132,8 @@ class TrainingLoop:
         self.total_steps = 0
         self.episode_count = 0
         
-        # Visualization setup
-        self.visualizer = ContainerVisualizer()
+        # Visualization setup with correct container dimensions
+        self.visualizer = ContainerVisualizer(container_dims=(env.L, env.W, env.H))
         self.vis_dir = Path('outputs/visualizations')
         self.vis_dir.mkdir(parents=True, exist_ok=True)
         self.vis_interval = 10  # Save visualization every N episodes
@@ -215,19 +215,12 @@ class TrainingLoop:
         }
 
         if np.sum(effective_mask[:-1]) > 0:
-            # For early training with random items, use random valid position
-            # instead of PPO (which hasn't learned good placement strategy yet)
-            valid_actions = np.where(effective_mask > 0)[0][:-1]  # Exclude skip action
-            if len(valid_actions) > 0:
-                ppo_action = np.random.choice(valid_actions)
-                ppo_log_prob = np.log(1.0 / len(valid_actions))  # Uniform probability
-            else:
-                ppo_action = int(np.where(effective_mask > 0)[0][-1])  # Skip action
-                ppo_log_prob = np.log(1.0)
+            # Use PPO agent to select position with masked action space
+            ppo_action, ppo_log_prob, ppo_value = self.ppo.select_action(
+                state, effective_mask
+            )
             
-            ppo_value = 0.0  # Dummy value
-            
-            # Return directly without MCTS blend for faster training
+            # Return action from PPO - let the policy learn good placement
             return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info
 
         self.rearrange_stats['deadlocks'] += 1
@@ -402,19 +395,37 @@ class TrainingLoop:
             if len(self.env.placed_items) == 0:
                 return  # Skip if no items placed
             
-            filename = self.vis_dir / f"episode_{episode_num:04d}{suffix}.png"
+            title = f"Episode {episode_num}: n_items={len(self.env.placed_items)}, util={100*self.env.get_utilization():.1f}%"
             
             # Save 2D visualization
-            self.visualizer.visualize_packing_2d(
+            fig_2d = self.visualizer.visualize_packing_2d(
                 self.env.placed_items,
                 self.env.placed_positions,
                 self.env.height_map,
-                title=f"Episode {episode_num}: n_items={len(self.env.placed_items)}, "
-                      f"util={100*self.env.get_utilization():.1f}%"
+                title=title
             )
-            plt.tight_layout()
-            plt.savefig(str(filename), dpi=100, bbox_inches='tight')
-            plt.close()
+            filename_2d = self.vis_dir / f"episode_{episode_num:04d}_2d{suffix}.png"
+            fig_2d.savefig(str(filename_2d), dpi=100, bbox_inches='tight')
+            plt.close(fig_2d)
+            
+            # Save 3D visualization
+            fig_3d = self.visualizer.visualize_packing_3d(
+                self.env.placed_items,
+                self.env.placed_positions,
+                title=title
+            )
+            filename_3d = self.vis_dir / f"episode_{episode_num:04d}_3d{suffix}.png"
+            fig_3d.savefig(str(filename_3d), dpi=100, bbox_inches='tight')
+            plt.close(fig_3d)
+            
+            # Save cross-sections
+            fig_cross = self.visualizer.visualize_cross_sections(
+                self.env.height_map,
+                title=f"Episode {episode_num}: Cross-Sections"
+            )
+            filename_cross = self.vis_dir / f"episode_{episode_num:04d}_cross{suffix}.png"
+            fig_cross.savefig(str(filename_cross), dpi=100, bbox_inches='tight')
+            plt.close(fig_cross)
             
         except Exception as e:
             import traceback
@@ -522,12 +533,12 @@ class TrainingLoop:
         
         return episode_info, next_value, strategy_buffer
     
-    def train_epoch(self, num_epochs=4, log_frequency=10):
+    def train_epoch(self, num_epochs=2, log_frequency=10):
         """
         Train untuk satu epoch (collect steps + update).
         
         Args:
-            num_epochs (int): Jumlah PPO update epochs
+            num_epochs (int): Jumlah PPO update epochs (reduced to 2 for faster training)
             log_frequency (int): Frequency untuk print summary
         """
         print(f"\n{'='*70}")
@@ -542,9 +553,9 @@ class TrainingLoop:
         self._update_high_level_agent(strategy_buffer)
         print("Done!")
         
-        # Update PPO network
+        # Update PPO network (reduced epochs and batch size for speed)
         print(f"Updating PPO network... ", end='', flush=True)
-        self.ppo.update(next_value=next_value, num_epochs=num_epochs, batch_size=64)
+        self.ppo.update(next_value=next_value, num_epochs=num_epochs, batch_size=32)
         print("Done!\n")
         
         # Print statistics
@@ -594,14 +605,14 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
     
     # Initialize environment
     print("Initializing environment...")
-    # Larger container to accommodate more items
+    # 20-foot container: 60×24×26 (decimeter units ≈ 6m × 2.4m × 2.6m)
     env = ContainerEnv(
         max_items=max_items, 
         seed=seed, 
         dataset_type=dataset_type,
-        container_length=100,   # Increased from 59
-        container_width=100,    # Increased from 23
-        container_height=100    # Increased from 23
+        container_length=60,    # 20 feet ≈ 6 meters
+        container_width=24,     # 8 feet ≈ 2.4 meters
+        container_height=26     # 8.5 feet ≈ 2.6 meters
     )
     state, action_mask = env.reset()
     

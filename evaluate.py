@@ -607,7 +607,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
     evaluator = EvaluationMetrics(container_dims=(59, 23, 23))
     
     # Setup visualization
-    visualizer = ContainerVisualizer() if save_visualizations else None
+    visualizer = ContainerVisualizer(container_dims=(59, 23, 23)) if save_visualizations else None
     vis_dir = Path('outputs/evaluation_visualizations') if save_visualizations else None
     if save_visualizations:
         vis_dir.mkdir(parents=True, exist_ok=True)
@@ -636,7 +636,6 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
                     title=f"Eval Episode {episode}: util={result['utilization']:.1f}%, "
                           f"bal={result['load_balance']:.3f}"
                 )
-                plt.tight_layout()
                 plt.savefig(str(vis_file), dpi=100, bbox_inches='tight')
                 plt.close()
             except Exception as e:

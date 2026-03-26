@@ -19,15 +19,15 @@ class ContainerEnv:
     3D Container Loading Environment dengan action masking dan LBCP validation.
     """
     
-    def __init__(self, container_length=59, container_width=23, container_height=23,
+    def __init__(self, container_length=60, container_width=24, container_height=26,
                  max_items=50, seed=None, dataset_type='random'):
         """
         Initialize container environment.
         
         Args:
-            container_length (int): Panjang container
-            container_width (int): Lebar container
-            container_height (int): Tinggi container
+            container_length (int): Panjang container (default: 60 = 6m / 20ft)
+            container_width (int): Lebar container (default: 24 = 2.4m / 8ft)
+            container_height (int): Tinggi container (default: 26 = 2.6m / 8.5ft)
             max_items (int): Maksimum jumlah items per episode
             seed (int): Random seed untuk reproducibility
             dataset_type (str): 'random' atau 'cutting_stock'
