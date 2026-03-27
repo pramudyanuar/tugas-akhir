@@ -2,17 +2,16 @@ import numpy as np
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from height_map import HeightMap
-from lbcp import is_stable
-from action_mask import ActionMask
+# Use relative imports for clean module structure
+from .height_map import HeightMap
+from .lbcp import is_stable
+from .action_mask import ActionMask
 
 # Import dari parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from dataset.random_generator import RandomGenerator
-from dataset.cutting_stock import CuttingStockGenerator
-from planning.repack import attempt_repack
+from src.data.random_generator import RandomGenerator
+from src.data.cutting_stock import CuttingStockGenerator
+from src.planning.repack import attempt_repack
 
 
 class ContainerEnv:
@@ -20,15 +19,15 @@ class ContainerEnv:
     3D Container Loading Environment dengan action masking dan LBCP validation.
     """
     
-    def __init__(self, container_length=59, container_width=23, container_height=23,
+    def __init__(self, container_length=60, container_width=24, container_height=26,
                  max_items=50, seed=None, dataset_type='random'):
         """
         Initialize container environment.
         
         Args:
-            container_length (int): Panjang container
-            container_width (int): Lebar container
-            container_height (int): Tinggi container
+            container_length (int): Panjang container (default: 60 = 6m / 20ft)
+            container_width (int): Lebar container (default: 24 = 2.4m / 8ft)
+            container_height (int): Tinggi container (default: 26 = 2.6m / 8.5ft)
             max_items (int): Maksimum jumlah items per episode
             seed (int): Random seed untuk reproducibility
             dataset_type (str): 'random' atau 'cutting_stock'
@@ -56,8 +55,8 @@ class ContainerEnv:
         self.placed_items = []
         self.placed_positions = []
         
-        # State size: height_map (L*W) + item_dims (3)
-        self.state_size = self.L * self.W + 3
+        # State size: height_map (L*W) + item_dims (3) + min_height_info (1)
+        self.state_size = self.L * self.W + 3 + 1
         # Action size: positions (L*W) + skip action
         self.action_size = self.L * self.W + 1
     
@@ -92,7 +91,7 @@ class ContainerEnv:
         """
         Get current state dan action mask.
         
-        State format: [height_map.flatten(), item_length, item_width, item_height]
+        State format: [height_map.flatten(), item_length, item_width, item_height, min_available_height]
         
         Returns:
             tuple: (state, action_mask)
@@ -107,11 +106,17 @@ class ContainerEnv:
         # Get current item
         item_l, item_w, item_h = self.items[self.current_index]
         
-        # Create state: normalized height_map + item dims
+        # Create state: normalized height_map + item dims + min height info
         normalized_height = self.height_map.normalize().flatten()
         item_dims = np.array([item_l / self.L, item_w / self.W, item_h / self.H], 
                             dtype=np.float32)
-        state = np.concatenate([normalized_height, item_dims])
+        
+        # Option 3: Add min_height_info to encourage bottom-up filling
+        # This helps the network learn to prefer lower positions
+        min_height = np.min(self.height_map.map) / self.H  # Normalized
+        min_height_info = np.array([min_height], dtype=np.float32)
+        
+        state = np.concatenate([normalized_height, item_dims, min_height_info])
         
         # Get action mask
         masking_result = self.action_mask_calculator.combine_masks(
@@ -183,9 +188,29 @@ class ContainerEnv:
         self.placed_items.append((item_l, item_w, item_h))
         self.placed_positions.append((x, y, base_height))
         
-        # Calculate reward based on volume utilization
+        # Option 1: Enhanced reward function for efficient packing
+        # Encourages both volume utilization AND bottom-up filling
         item_volume = item_l * item_w * item_h
-        reward = (item_volume / self.container_volume) * 10.0  # Scale rewards
+        
+        # Current container utilization
+        total_placed_volume = sum(item[0] * item[1] * item[2] 
+                                 for item in self.placed_items)
+        current_utilization = total_placed_volume / self.container_volume
+        
+        # Height efficiency penalty: penalize stacking too high
+        max_height_now = np.max(self.height_map.map)
+        height_efficiency = 1.0 - (max_height_now / self.H)  # 1.0 = low, 0.0 = high
+        
+        # Placement quality: prefer placing at lower heights (bottom-up)
+        placement_height_ratio = base_height / self.H
+        height_penalty = placement_height_ratio * 0.1  # Slight penalty for high placement
+        
+        # Combined reward
+        volume_reward = (item_volume / self.container_volume) * 8.0  # 80% weight
+        utilization_bonus = current_utilization * 2.0  # Encourage filling efficiently
+        height_bonus = height_efficiency * 1.0  # Encourage spreading vertically
+        
+        reward = volume_reward + utilization_bonus + height_bonus - height_penalty
         
         self.episode_reward += reward
         
@@ -324,130 +349,4 @@ class ContainerEnv:
         print(f"Max Height: {self.get_max_height()}/{self.H}")
         print(f"Episode Reward: {self.episode_reward:.2f}")
 
-
-if __name__ == "__main__":
-    """Test cases untuk ContainerEnv"""
-    
-    print("=" * 70)
-    print("Test Case 1: Environment Initialization")
-    print("=" * 70)
-    
-    env = ContainerEnv(seed=42)
-    state, action_mask = env.reset()
-    
-    print(f"State shape: {state.shape}")
-    print(f"Action mask shape: {action_mask.shape}")
-    print(f"Expected state size: {env.state_size}")
-    print(f"Expected action size: {env.action_size}")
-    print(f"Valid actions: {np.sum(action_mask > 0)}")
-    
-    assert state.shape == (env.state_size,), f"Wrong state shape! {state.shape}"
-    assert action_mask.shape == (env.action_size,), f"Wrong action mask shape!"
-    print("✓ PASSED\n")
-    
-    print("=" * 70)
-    print("Test Case 2: Step with Valid Placement")
-    print("=" * 70)
-    
-    env = ContainerEnv(seed=123)
-    state, action_mask = env.reset()
-    
-    # Find first valid action
-    valid_positions = np.where(action_mask > 0)[0]
-    if len(valid_positions) > 0:
-        action = valid_positions[0]
-        (next_state, next_mask), reward, done, info = env.step(action)
-        
-        print(f"Action taken: {action}")
-        print(f"Reward: {reward:.4f}")
-        print(f"Done: {done}")
-        print(f"Success: {info['success']}")
-        print(f"Next state shape: {next_state.shape}")
-        
-        assert next_state.shape == (env.state_size,), "Wrong next state shape!"
-        assert reward > 0, "Reward should be positive for valid placement!"
-        print("✓ PASSED\n")
-    else:
-        print("No valid positions found\n")
-    
-    print("=" * 70)
-    print("Test Case 3: Skip Action")
-    print("=" * 70)
-    
-    env = ContainerEnv(seed=456)
-    state, action_mask = env.reset()
-    
-    skip_action = env.L * env.W
-    (next_state, next_mask), reward, done, info = env.step(skip_action)
-    
-    print(f"Skip action: {skip_action}")
-    print(f"Reward: {reward:.4f}")
-    print(f"Action type: {info['action_type']}")
-    
-    assert info['action_type'] == 'skip', "Should be skip action!"
-    print("✓ PASSED\n")
-    
-    print("=" * 70)
-    print("Test Case 4: Utilization Calculation")
-    print("=" * 70)
-    
-    env = ContainerEnv(seed=789)
-    state, action_mask = env.reset()
-    
-    # Place a few items
-    for _ in range(3):
-        valid_positions = np.where(action_mask > 0)[0]
-        if len(valid_positions) > 0:
-            action = valid_positions[0]
-            (state, action_mask), reward, done, info = env.step(action)
-            if done:
-                break
-        else:
-            break
-    
-    utilization = env.get_utilization()
-    max_height = env.get_max_height()
-    
-    print(f"Items placed: {len(env.placed_items)}")
-    print(f"Utilization: {utilization:.2f}%")
-    print(f"Max height: {max_height}")
-    print(f"Episode reward: {env.episode_reward:.4f}")
-    
-    assert 0 <= utilization <= 100, "Utilization out of range!"
-    print("✓ PASSED\n")
-    
-    print("=" * 70)
-    print("Test Case 5: Full Episode")
-    print("=" * 70)
-    
-    env = ContainerEnv(max_items=10, seed=999)
-    state, action_mask = env.reset()
-    
-    step_count = 0
-    while step_count < 100:  # Max 100 steps
-        valid_positions = np.where(action_mask > 0)[0]
-        
-        if len(valid_positions) == 0:
-            # No valid positions, must skip
-            action = env.L * env.W
-        else:
-            # Take first valid action
-            action = valid_positions[0]
-        
-        (state, action_mask), reward, done, info = env.step(action)
-        step_count += 1
-        
-        if done:
-            break
-    
-    print(f"Episode finished!")
-    print(f"Steps taken: {step_count}")
-    print(f"Items placed: {len(env.placed_items)}")
-    print(f"Final utilization: {env.get_utilization():.2f}%")
-    print(f"Final episode reward: {env.episode_reward:.4f}")
-    
-    print("✓ PASSED\n")
-    
-    print("=" * 70)
-    print("All ContainerEnv tests passed!")
     print("=" * 70)

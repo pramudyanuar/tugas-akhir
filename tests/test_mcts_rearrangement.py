@@ -1,7 +1,7 @@
 import unittest
 
-from env.container_env import ContainerEnv
-from planning.mcts import MCTS
+from src.core.container_env import ContainerEnv
+from src.planning.mcts import MCTS
 
 
 class TestMCTSRearrangement(unittest.TestCase):

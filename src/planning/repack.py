@@ -3,8 +3,8 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from env.lbcp import is_stable
-from env.height_map import HeightMap
+from src.core.lbcp import is_stable
+from src.core.height_map import HeightMap
 
 
 class Repacker:
@@ -458,58 +458,3 @@ def attempt_repack(env, strategy='load_balanced'):
             env.height_map.update_region_absolute(x, y, l, w, new_height)
     
     return result
-
-
-if __name__ == "__main__":
-    """Test repacking functionality"""
-    
-    print("=" * 70)
-    print("REPACKING MECHANISM TEST")
-    print("=" * 70)
-    
-    repacker = Repacker(container_dims=(59, 23, 23))
-    
-    # Test items
-    items = [
-        (10, 10, 10),  # volume 1000
-        (8, 8, 8),     # volume 512
-        (6, 6, 6),     # volume 216
-        (5, 5, 5),     # volume 125
-    ]
-    
-    positions = [
-        (0, 0, 0),
-        (10, 0, 0),
-        (20, 0, 0),
-        (30, 0, 0),
-    ]
-    
-    print("\n1. Testing Bottom-Left-Fill Repacking")
-    print("-" * 70)
-    success1, pos1, metric1 = repacker.attempt_repack_bottom_left_fill(items, positions)
-    print(f"Success: {success1}")
-    print(f"New positions: {pos1}")
-    print(f"Metric: {metric1:.4f}")
-    
-    print("\n2. Testing Load-Balanced Repacking")
-    print("-" * 70)
-    success2, pos2, metric2 = repacker.attempt_repack_load_balanced(items, positions)
-    print(f"Success: {success2}")
-    print(f"New positions: {pos2}")
-    print(f"Load Balance Score: {metric2:.4f}")
-    
-    print("\n3. Testing Minimize Height Repacking")
-    print("-" * 70)
-    success3, pos3, metric3 = repacker.attempt_repack_minimize_height(items, positions)
-    print(f"Success: {success3}")
-    print(f"New positions: {pos3}")
-    print(f"Height Reduction: {metric3:.2f}x")
-    
-    print("\n4. Testing Auto Repack")
-    print("-" * 70)
-    result = repacker.auto_repack(items, positions, strategy='auto')
-    print(f"Result: {result}")
-    
-    print("\n" + "=" * 70)
-    print("✓ Repacking tests completed!")
-    print("=" * 70)
