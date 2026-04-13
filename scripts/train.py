@@ -17,6 +17,7 @@ from src.core.candidate_generator import CandidateGenerator
 from src.learning.models.high_level_agent import HighLevelAgent
 from src.learning.agents.ppo import PPO
 from src.planning.mcts import MCTS
+from src.planning.high_level_search import HighLevelSearcher
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
 
@@ -227,8 +228,22 @@ class TrainingLoop:
 
         # Deadlock handling: optional repack if no candidate position exists.
         if macro_decision.get('allow_repacking', False) and len(self.env.placed_items) > 0:
-            repack_result = self.env.perform_repack(strategy='load_balanced')
-            if repack_result.get('success', False):
+            # Use HighLevelSearcher for deadlock resolution
+            searcher = HighLevelSearcher(
+                self.env,
+                max_depth=20,
+                mcts_budget=50,
+                use_repack=True
+            )
+            env_state = {
+                'items': self.env.items,
+                'current_index': self.env.current_index,
+                'height_map': self.env.height_map,
+                'placed_items': self.env.placed_items,
+                'placed_positions': self.env.placed_positions
+            }
+            search_result = searcher.search(env_state)
+            if search_result.get('success', False):
                 # Recompute state and mask after repacking.
                 state, action_mask = self.env._get_state_and_mask()
                 candidate_actions = self.candidate_generator.generate_from_macro(

@@ -6,12 +6,13 @@ import os
 from .height_map import HeightMap
 from .lbcp import is_stable
 from .action_mask import ActionMask
+from .feasibility_map import FeasibilityMap
 
 # Import dari parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.data.random_generator import RandomGenerator
 from src.data.cutting_stock import CuttingStockGenerator
-from src.planning.repack import attempt_repack
+from src.data.perfect_pack_generator import PerfectPackGenerator
 
 
 class ContainerEnv:
@@ -30,7 +31,7 @@ class ContainerEnv:
             container_height (int): Tinggi container (default: 26 = 2.6m / 8.5ft)
             max_items (int): Maksimum jumlah items per episode
             seed (int): Random seed untuk reproducibility
-            dataset_type (str): 'random' atau 'cutting_stock'
+            dataset_type (str): 'random', 'cutting_stock', atau 'perfect_pack'
         """
         self.L = container_length
         self.W = container_width
@@ -39,9 +40,19 @@ class ContainerEnv:
         self.dataset_type = dataset_type
         
         self.height_map = HeightMap(self.L, self.W, self.H)
+        self.feasibility_map = FeasibilityMap(self.L, self.W)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
+        
+        # Initialize dataset generator based pada type
         if dataset_type == 'cutting_stock':
             self.dataset_generator = CuttingStockGenerator(seed=seed)
+        elif dataset_type == 'perfect_pack':
+            self.dataset_generator = PerfectPackGenerator(
+                bin_width=self.W,
+                bin_height=self.H,
+                sigma=2,
+                seed=seed
+            )
         else:
             self.dataset_generator = RandomGenerator(seed=seed)
         
@@ -71,6 +82,7 @@ class ContainerEnv:
             tuple: (state, action_mask)
         """
         self.height_map.reset()
+        self.feasibility_map.reset()
         
         if seed is not None:
             self.dataset_generator.set_seed(seed)
@@ -276,70 +288,6 @@ class ContainerEnv:
     def get_max_height(self):
         """Get maximum height in current container."""
         return int(np.max(self.height_map.map))
-    
-    def perform_repack(self, strategy='load_balanced'):
-        """
-        Perform repacking operation untuk reorganisasi items.
-        
-        Args:
-            strategy (str): Repacking strategy ('blf', 'load_balanced', 'min_height', 'auto')
-            
-        Returns:
-            dict: Repacking result dengan:
-                - 'success': bool
-                - 'reward': float (reward untuk repacking action)
-                - 'old_utilization': float
-                - 'new_utilization': float
-                - 'improvement': float
-                - 'description': str
-        """
-        if len(self.placed_items) == 0:
-            return {
-                'success': False,
-                'reward': 0.0,
-                'old_utilization': 0.0,
-                'new_utilization': 0.0,
-                'improvement': 0.0,
-                'description': 'No items to repack'
-            }
-        
-        # Calculate old metrics
-        old_util = self.get_utilization()
-        old_max_height = self.get_max_height()
-        
-        # Attempt repacking
-        repack_result = attempt_repack(self, strategy=strategy)
-        
-        if not repack_result['success']:
-            return {
-                'success': False,
-                'reward': -0.1,  # Penalty untuk repack gagal
-                'old_utilization': old_util,
-                'new_utilization': old_util,
-                'improvement': 0.0,
-                'description': 'Repacking failed'
-            }
-        
-        # Calculate new metrics
-        new_util = self.get_utilization()
-        new_max_height = self.get_max_height()
-        
-        # Calculate improvement
-        height_improvement = old_max_height / max(new_max_height, 1.0)
-        util_improvement = new_util / max(old_util, 0.1)
-        
-        # Reward untuk successful repacking
-        reward = 0.1 + 0.05 * (height_improvement - 1.0)
-        
-        return {
-            'success': True,
-            'reward': reward,
-            'old_utilization': old_util,
-            'new_utilization': new_util,
-            'improvement': height_improvement,
-            'description': repack_result['description'],
-            'strategy': repack_result['strategy_used']
-        }
     
     def render(self):
         """Print container state."""

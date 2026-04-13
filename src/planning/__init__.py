@@ -1,5 +1,6 @@
-"""Planning modules (MCTS, Repack)."""
+"""Planning modules (MCTS, HighLevelSearcher, RepackTrial)."""
 from .mcts import MCTS
-from .repack import attempt_repack
+from .high_level_search import HighLevelSearcher
+from .repack_trial import RepackTrial
 
-__all__ = ['MCTS', 'attempt_repack']
+__all__ = ['MCTS', 'HighLevelSearcher', 'RepackTrial']

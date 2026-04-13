@@ -17,6 +17,7 @@ from src.core.candidate_generator import CandidateGenerator
 from src.learning.models.high_level_agent import HighLevelAgent
 from src.learning.models.actor_critic import ActorCriticNetwork
 from src.planning.mcts import MCTS
+from src.planning.high_level_search import HighLevelSearcher
 from src.learning.agents.oracle_policy import OraclePolicy, RandomPolicy
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
@@ -294,8 +295,23 @@ class EvaluationMetrics:
                 action = env.L * env.W  # default: skip action
 
                 if macro_decision.get('allow_repacking', False) and len(env.placed_items) > 0:
-                    env.perform_repack(strategy='load_balanced')
-                    state, action_mask = env._get_state_and_mask()
+                    # Use HighLevelSearcher for deadlock resolution
+                    searcher = HighLevelSearcher(
+                        env,
+                        max_depth=20,
+                        mcts_budget=50,
+                        use_repack=True
+                    )
+                    env_state = {
+                        'items': env.items,
+                        'current_index': env.current_index,
+                        'height_map': env.height_map,
+                        'placed_items': env.placed_items,
+                        'placed_positions': env.placed_positions
+                    }
+                    search_result = searcher.search(env_state)
+                    if search_result.get('success', False):
+                        state, action_mask = env._get_state_and_mask()
                     candidate_actions = candidate_generator.generate_from_macro(
                         action_mask,
                         macro_decision=macro_decision,
