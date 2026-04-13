@@ -410,7 +410,7 @@ class TrainingLoop:
             if len(self.env.placed_items) == 0:
                 return  # Skip if no items placed
             
-            title = f"Episode {episode_num}: n_items={len(self.env.placed_items)}, util={100*self.env.get_utilization():.1f}%"
+            title = f"Episode {episode_num}: n_items={len(self.env.placed_items)}, util={self.env.get_utilization():.1f}%"
             
             # Save 2D visualization
             fig_2d = self.visualizer.visualize_packing_2d(

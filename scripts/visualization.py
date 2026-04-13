@@ -93,14 +93,26 @@ class ContainerVisualizer:
     
     def visualize_packing_3d(self, placed_items, placed_positions, title="3D Container Packing"):
         """
-        Visualize packing dalam 3D.
+        Visualize packing dalam 3D dengan aspect ratio realistic.
         
         Args:
             placed_items: List of (length, width, height)
             placed_positions: List of (x, y, z)
             title: Plot title
         """
-        fig = plt.figure(figsize=(12, 9))
+        # Calculate figure size based on container aspect ratio
+        # Normalize by max dimension to preserve proportions
+        max_dim = max(self.L, self.W, self.H)
+        normalized_l = self.L / max_dim
+        normalized_w = self.W / max_dim
+        normalized_h = self.H / max_dim
+        
+        # Scale to reasonable figure size (base 14 inches for longest dimension)
+        base_size = 14
+        fig_width = base_size * normalized_l
+        fig_height = base_size * normalized_h
+        
+        fig = plt.figure(figsize=(fig_width, fig_height))
         ax = fig.add_subplot(111, projection='3d')
         
         # Draw container frame
@@ -139,16 +151,24 @@ class ContainerVisualizer:
                                               edgecolors='black', linewidth=1)
             ax.add_collection3d(face_collection)
         
-        # Set limits
-        ax.set_xlim(0, self.L)
-        ax.set_ylim(0, self.W)
-        ax.set_zlim(0, self.H)
+        # Set limits dengan margin kecil
+        margin = 2
+        ax.set_xlim(-margin, self.L + margin)
+        ax.set_ylim(-margin, self.W + margin)
+        ax.set_zlim(0, self.H + margin)
         
-        # Labels
-        ax.set_xlabel(f'Length ({self.L})')
-        ax.set_ylabel(f'Width ({self.W})')
-        ax.set_zlabel(f'Height ({self.H})')
-        ax.set_title(title, fontsize=14, fontweight='bold')
+        # Set equal aspect ratio untuk lebih realistis
+        ax.set_box_aspect([self.L, self.W, self.H])
+        
+        # Labels dengan dimensi nyata
+        ax.set_xlabel(f'Length (L={self.L})', fontsize=11, fontweight='bold')
+        ax.set_ylabel(f'Width (W={self.W})', fontsize=11, fontweight='bold')
+        ax.set_zlabel(f'Height (H={self.H})', fontsize=11, fontweight='bold')
+        
+        # Set viewing angle untuk perspektif yang optimal
+        ax.view_init(elev=25, azim=45)
+        
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
         
         return fig
     

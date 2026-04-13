@@ -284,21 +284,104 @@ class PerfectPackGenerator:
         """Set random seed untuk reproducibility."""
         self.rng = np.random.RandomState(seed)
 
-    def generate_episode(self, num_items=None, **kwargs):
+    def generate_episode(self, num_items=50, **kwargs):
         """
-        Generate episode dengan perfect pack algoritma.
+        Generate episode dengan kontrol jumlah items dan utilization yang reasonable.
         
-        Compatibility method untuk match RandomGenerator interface.
+        Strategy:
+        - Untuk 1-5 items: Generate besar items (close to perfect pack)
+        - Untuk 6-15 items: Mix ukuran medium-large
+        - Untuk 15+ items: Banyak items kecil yang total sekitar 80-95% utilization
 
         Args:
-            num_items (int): Number of items untuk generate (optional, ignored)
+            num_items (int): Number of items to generate (default: 50)
             
         Returns:
-            list: Item set dengan ~100% utilization
+            list: Item set dengan dimensi 3D (length, width, height) yang fit dalam container
         """
-        # Perfect pack generator returns items for ~100% utilization
-        # Num items is determined by the packing algorithm
-        return self.generate_perfect_pack(num_attempts=3)
+        if num_items <= 0:
+            num_items = 50
+        
+        items = []
+        target_utilization = 0.85  # Target 85% utilization
+        target_area = int(self.container_volume * target_utilization)
+        current_area = 0
+        
+        if num_items <= 5:
+            # Few large items - use perfect pack algorithm
+            items = self.generate_perfect_pack(num_attempts=3)
+            # Pad if necessary
+            while len(items) < num_items:
+                small_item = (self.rng.randint(3, 6), 
+                             self.rng.randint(3, 6), 
+                             self.rng.randint(self.min_height, self.max_height + 1))
+                items.append(small_item)
+            return items[:num_items]
+        
+        elif num_items <= 15:
+            # Medium number: mix of sizes
+            # Generate items dengan target untuk mencapai ~85% utilization
+            area_per_item = target_area // num_items
+            
+            for i in range(num_items):
+                remaining_items = num_items - i
+                remaining_area = max(1, target_area - current_area)
+                avg_area_needed = remaining_area // remaining_items
+                
+                # Sample item dengan area close to average needed
+                # Generate items dengan random size tapi constrain total area
+                max_attempts = 10
+                for _ in range(max_attempts):
+                    w = self.rng.randint(4, 14)
+                    h = self.rng.randint(4, 14)
+                    
+                    # Constraint: item area tidak lebih dari remaining space
+                    if w * h <= remaining_area + 10:  # Allow small overage
+                        d = self.rng.randint(self.min_height, self.max_height + 1)
+                        items.append((w, h, d))
+                        current_area += w * h
+                        break
+                else:
+                    # If can't find good size, add small item
+                    d = self.rng.randint(self.min_height, self.max_height + 1)
+                    items.append((3, 3, d))
+                    current_area += 9
+            
+            return items[:num_items]
+        
+        else:
+            # Many items: lots of small items
+            # Target ~10-25 area per item untuk fit many items
+            area_per_item = max(5, target_area // num_items)
+            
+            for i in range(num_items):
+                remaining_items = num_items - i
+                remaining_area = max(1, target_area - current_area)
+                
+                # Generate small items
+                max_w = int(np.sqrt(remaining_area / remaining_items)) + 2
+                max_h = int(np.sqrt(remaining_area / remaining_items)) + 2
+                
+                w = self.rng.randint(2, min(max_w, 10))
+                h = self.rng.randint(2, min(max_h, 10))
+                d = self.rng.randint(self.min_height, self.max_height + 1)
+                
+                items.append((w, h, d))
+                current_area += w * h
+                
+                # Stop if we've reached target area
+                if current_area >= target_area:
+                    break
+            
+            # Pad dengan more items if needed
+            while len(items) < num_items and current_area < target_area * 1.1:
+                w = self.rng.randint(2, 4)
+                h = self.rng.randint(2, 4)
+                d = self.rng.randint(self.min_height, self.max_height + 1)
+                items.append((w, h, d))
+                current_area += w * h
+            
+            return items[:num_items]
 
 
 # Convenience function untuk API compatibility

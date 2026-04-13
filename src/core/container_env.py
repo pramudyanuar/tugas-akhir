@@ -201,7 +201,7 @@ class ContainerEnv:
         self.placed_positions.append((x, y, base_height))
         
         # Option 1: Enhanced reward function for efficient packing
-        # Encourages both volume utilization AND bottom-up filling
+        # Encourages both volume utilization AND bottom-up filling AND back-to-front access
         item_volume = item_l * item_w * item_h
         
         # Current container utilization
@@ -217,12 +217,17 @@ class ContainerEnv:
         placement_height_ratio = base_height / self.H
         height_penalty = placement_height_ratio * 0.1  # Slight penalty for high placement
         
+        # Back-to-front preference: reward placing items deeper (higher y = further from door)
+        # This keeps front area accessible for unloading
+        back_placement_ratio = y / self.W  # 0.0 = front, 1.0 = back
+        back_bonus = back_placement_ratio * 0.5  # Bonus for back placement
+        
         # Combined reward
         volume_reward = (item_volume / self.container_volume) * 8.0  # 80% weight
         utilization_bonus = current_utilization * 2.0  # Encourage filling efficiently
         height_bonus = height_efficiency * 1.0  # Encourage spreading vertically
         
-        reward = volume_reward + utilization_bonus + height_bonus - height_penalty
+        reward = volume_reward + utilization_bonus + height_bonus + back_bonus - height_penalty
         
         self.episode_reward += reward
         
@@ -242,7 +247,7 @@ class ContainerEnv:
     
     def _is_valid_position(self, x, y, item_l, item_w, item_h):
         """
-        Check if position is valid (boundary + overflow + stability).
+        Check if position is valid (boundary + overflow + stability + passway accessibility).
         
         Args:
             x, y: Position
@@ -251,6 +256,12 @@ class ContainerEnv:
         Returns:
             bool: True jika valid
         """
+        # Door constraint: pintu ada di depan (y=0), min clearance
+        # Tapi yang penting: jangan block akses ke belakang
+        # Strategy: prefer placements di BELAKANG (tinggi y) untuk menjaga akses depan
+        
+        PASSWAY_MINIMUM = 2  # Minimum width passway untuk akses
+        
         # Check boundary
         if x + item_l > self.L or y + item_w > self.W:
             return False
@@ -260,11 +271,28 @@ class ContainerEnv:
         if base_height + item_h > self.H:
             return False
         
-        # Check stability with LBCP
-        try:
-            if not is_stable(self.height_map.map, x, y, item_l, item_w, item_h, self.H):
+        # Passway accessibility: jika item di depan (y < W-PASSWAY_MINIMUM)
+        # pastikan ada minimal 1 clear path untuk akses belakang
+        if y < (self.W - PASSWAY_MINIMUM):
+            # Item di area depan - check jangan sepenuhnya block passway
+            # Simplication: allow if item doesn't span entire width
+            # atau ada corridor yang tetap terbuka
+            if item_w >= (self.W - PASSWAY_MINIMUM):
+                # Item ini akan block passway sepenuhnya - REJECT
                 return False
+        
+        # Check stability with LBCP
+        # Lantai (base_height=0) selalu support, items di atas harus penuhi LBCP strict
+        try:
+            if base_height == 0:
+                # Item di atas lantai - always stable (lantai adalah support sempurna)
+                pass
+            else:
+                # Item berlapis di atas items lain - check dengan strict LBCP
+                if not is_stable(self.height_map.map, x, y, item_l, item_w, item_h, self.H, strict_mode=True):
+                    return False
         except Exception:
+            # Jika ada error di strict check, reject untuk safety
             return False
         
         return True
