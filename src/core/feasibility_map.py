@@ -96,10 +96,7 @@ class FeasibilityMap:
             
             # Step 3: Mark points dalam support polygon sebagai feasible
             # (Algoritm 2 line 7-9)
-            for px, py in hull_points:
-                px, py = int(px), int(py)
-                if 0 <= px < self.L and 0 <= py < self.W:
-                    self.map[px, py] = True
+            self.map = StabilityValidator.update_feasibility_map(self.map, hull_points)
             
             # Record update untuk history
             self.update_history.append({

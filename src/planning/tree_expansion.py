@@ -13,6 +13,8 @@ Main Features:
 import numpy as np
 import copy
 
+from src.core.lbcp import validate_structural_stability, update_feasibility_map
+
 
 class TreeExpander:
     """
@@ -43,7 +45,8 @@ class TreeExpander:
         19.            X, solved ← TREEEXPANSION(v', X, χ', d+1, n', requireFullPack)
     """
 
-    def __init__(self, env, max_depth=20, reward_weights=None):
+    def __init__(self, env, max_depth=20, reward_weights=None,
+                 max_candidates_per_orientation=8, max_candidates_total=24):
         """
         Initialize TreeExpander.
 
@@ -71,6 +74,10 @@ class TreeExpander:
             }
         self.reward_weights = reward_weights
         
+        # Candidate limits to control branching
+        self.max_candidates_per_orientation = max_candidates_per_orientation
+        self.max_candidates_total = max_candidates_total
+
         # For tracking
         self.sequence_count = 0
 
@@ -126,25 +133,38 @@ class TreeExpander:
             else:
                 item_l, item_w = l, w
 
-            # Find best placement untuk this orientation
-            action = self._low_level_policy(root_state, item_l, item_w, h)
-            
-            # Compute reward
-            reward = self._compute_reward(root_state, action, item_l, item_w, h)
-            
-            # Check accessibility
-            is_accessible = action is not None and action != (self.env.L * self.env.W,)
-            
-            if is_accessible:
+            candidate_actions = self._generate_candidate_actions(
+                root_state,
+                item_l,
+                item_w,
+                h,
+                max_candidates=self.max_candidates_per_orientation,
+            )
+
+            if candidate_actions:
                 stop = False
-            
-            candidates.append({
-                'object_idx': current_index,
-                'phi': phi,
-                'action': action,
-                'reward': reward,
-                'is_accessible': is_accessible
-            })
+
+            for action, reward in candidate_actions:
+                candidate_key = (current_index, phi, action)
+                if candidate_key in placements_tried:
+                    continue
+                placements_tried.add(candidate_key)
+                candidates.append({
+                    'object_idx': current_index,
+                    'phi': phi,
+                    'action': action,
+                    'reward': reward,
+                    'is_accessible': True
+                })
+
+            if not candidate_actions:
+                candidates.append({
+                    'object_idx': current_index,
+                    'phi': phi,
+                    'action': None,
+                    'reward': -10.0,
+                    'is_accessible': False
+                })
 
         # If nothing accessible, return early
         if stop and len(sequence) == 0:
@@ -152,6 +172,8 @@ class TreeExpander:
 
         # Line 8: Sort candidates by reward
         candidates.sort(key=lambda c: c['reward'], reverse=True)
+        if self.max_candidates_total is not None:
+            candidates = candidates[:self.max_candidates_total]
 
         # Line 8-18: Process each candidate
         for candidate in candidates:
@@ -168,9 +190,7 @@ class TreeExpander:
             new_sequence = sequence + [(current_index, phi, action, depth)]
             
             # Check if can place
-            can_place = (action is not None and 
-                        action != (self.env.L * self.env.W,) and
-                        candidate['is_accessible'])
+            can_place = (action is not None and candidate['is_accessible'])
             
             if not can_place:
                 # Line 13-15: Terminal sequence
@@ -220,7 +240,7 @@ class TreeExpander:
         Returns:
             tuple: (x, y, z) position atau None if no valid placement
         """
-        height_map = state.get('height_map')
+        height_map = self._get_height_map_array(state)
         if height_map is None:
             return None
 
@@ -241,6 +261,57 @@ class TreeExpander:
                             best_pos = (x, y, z)
 
         return best_pos
+
+    def _generate_candidate_actions(self, state, item_l, item_w, item_h, max_candidates=8):
+        """
+        Generate candidate actions with reward scores using action masks.
+
+        Returns:
+            list: [(action, reward)] sorted by reward desc
+        """
+        height_map = self._get_height_map_array(state)
+        if height_map is None:
+            return []
+
+        # Build validity mask using env's action mask calculator if available.
+        height_map_obj = self._get_height_map_object(state)
+        if (
+            hasattr(self.env, 'action_mask_calculator')
+            and self.env.action_mask_calculator is not None
+            and height_map_obj is not None
+        ):
+            masking = self.env.action_mask_calculator.combine_masks(
+                item_l,
+                item_w,
+                item_h,
+                height_map_obj,
+                feasibility_map=state.get('feasibility_map', None),
+                use_structural_validation=getattr(self.env, 'use_structural_validation', False),
+                cog_tolerance=getattr(self.env, 'cog_tolerance', 0.15),
+            )
+            valid_positions = masking.get('valid_positions', [])
+        else:
+            valid_positions = []
+            for x in range(self.env.L - item_l + 1):
+                for y in range(self.env.W - item_w + 1):
+                    region_max = np.max(height_map[x:x+item_l, y:y+item_w])
+                    if region_max + item_h <= self.env.H:
+                        valid_positions.append((x, y))
+
+        if not valid_positions:
+            return []
+
+        candidates = []
+        for x, y in valid_positions:
+            region_max = np.max(height_map[x:x+item_l, y:y+item_w])
+            action = (x, y, int(region_max))
+            reward = self._compute_reward(state, action, item_l, item_w, item_h)
+            candidates.append((action, reward))
+
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        if max_candidates is not None:
+            return candidates[:max_candidates]
+        return candidates
 
     def _compute_reward(self, state, action, item_l, item_w, item_h):
         """
@@ -264,7 +335,7 @@ class TreeExpander:
         util_reward = self.reward_weights['utilization'] * (item_volume / self.env.L / self.env.W / self.env.H)
         
         # Edge contact reward
-        height_map = state.get('height_map')
+        height_map = self._get_height_map_array(state)
         edge_reward = self.reward_weights['edge_contact'] * self._edge_contact_score(
             height_map, x, y, item_l, item_w
         )
@@ -320,21 +391,18 @@ class TreeExpander:
         # Update current index
         child_state['current_index'] = item_idx + 1
         
-        # Update height map dengan item yang baru di-place
+        # Update height map dan placement tracking
         if action is not None:
             x, y, z = action
             items = parent_state.get('items', [])
             if item_idx < len(items):
                 l, w, h = items[item_idx]
-                
+
                 # Rotate jika phi = 1
                 if phi == 1:
                     l, w = w, l
-                
-                # Update height map
-                height_map = child_state.get('height_map')
-                if height_map is not None:
-                    height_map[x:x+l, y:y+w] = z + h
+
+                self._update_state_after_placement(child_state, (x, y, z), (l, w, h))
         
         return child_state
 
@@ -348,12 +416,82 @@ class TreeExpander:
         Returns:
             bool: True jika bin full
         """
-        height_map = state.get('height_map')
+        height_map = self._get_height_map_array(state)
         if height_map is None:
             return False
 
         # Bin full jika max height >= H
         return np.max(height_map) >= self.env.H
+
+    def _get_height_map_array(self, state):
+        """Return numpy array from state height_map if available."""
+        height_map = state.get('height_map') if isinstance(state, dict) else None
+        if height_map is None:
+            return None
+        return height_map.map if hasattr(height_map, 'map') else height_map
+
+    def _get_height_map_object(self, state):
+        """Return HeightMap object or array from state for mask calculations."""
+        if not isinstance(state, dict):
+            return None
+        return state.get('height_map')
+
+    def _update_state_after_placement(self, state, action, item_dims):
+        """
+        Update height map, feasibility map, and placement tracking in state.
+
+        Args:
+            state (dict): State to update
+            action (tuple): (x, y, z)
+            item_dims (tuple): (l, w, h)
+        """
+        x, y, z = action
+        l, w, h = item_dims
+
+        # Update height map
+        height_map = state.get('height_map')
+        if height_map is not None:
+            if hasattr(height_map, 'update_region'):
+                height_map.update_region(x, y, l, w, z + h)
+            else:
+                height_map[x:x+l, y:y+w] = z + h
+
+        # Update feasibility map if structural validation enabled
+        if (
+            getattr(self.env, 'use_structural_validation', False)
+            and state.get('feasibility_map') is not None
+            and height_map is not None
+        ):
+            try:
+                obj_payload = {'x': x, 'y': y, 'w': l, 'd': w}
+                valid, support_polygon, _ = validate_structural_stability(
+                    obj_payload,
+                    None,
+                    height_map.map if hasattr(height_map, 'map') else height_map,
+                    state.get('feasibility_map'),
+                    getattr(self.env, 'cog_tolerance', 0.15),
+                )
+                if valid and support_polygon is not None and len(support_polygon) >= 3:
+                    state['feasibility_map'] = update_feasibility_map(
+                        state.get('feasibility_map'),
+                        support_polygon,
+                    )
+            except Exception:
+                pass
+
+        # Track placed items/positions for utilization
+        placed_items = state.get('placed_items')
+        placed_positions = state.get('placed_positions')
+
+        if placed_items is None:
+            placed_items = []
+            state['placed_items'] = placed_items
+        if placed_positions is None:
+            placed_positions = []
+            state['placed_positions'] = placed_positions
+
+        placed_items.append(item_dims)
+        placed_positions.append((x, y, z))
 
     def _sort_sequence(self, sequence):
         """

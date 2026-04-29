@@ -37,8 +37,8 @@ class TestActionMask:
         height_map.update_region(0, 0, 10, 10, 20)  # Heights = 20
         height_map.update_region(20, 0, 10, 10, 15)  # Heights = 15
         
-        item_h = 5
-        mask_overflow = action_mask.mask_overflow(item_h, height_map)
+        item_l, item_w, item_h = 5, 5, 5
+        mask_overflow = action_mask.mask_overflow(item_l, item_w, item_h, height_map)
         
         # Position (0, 0) has base height 20, 20+5 > 23, should be masked
         # Position (20, 0) has base height 15, 15+5 <= 23, should be valid

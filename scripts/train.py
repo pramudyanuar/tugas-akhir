@@ -194,71 +194,66 @@ class TrainingLoop:
         )
         
         macro_decision = self.high_level_agent.decode_macro_decision(strategy)
+        orientation = macro_decision.get('orientation', 0)
+
+        # Recompute state/mask for the selected orientation.
+        policy_state, policy_action_mask = self.env._get_state_and_mask(
+            orientation=orientation
+        )
 
         # Candidate generation from macro decision.
         candidate_actions = self.candidate_generator.generate_from_macro(
-            action_mask,
+            policy_action_mask,
             macro_decision=macro_decision,
             top_k=128
         )
 
-        effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+        effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
         if len(candidate_actions) > 0:
             for idx in candidate_actions:
-                if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                if 0 <= idx < self.env.L * self.env.W and policy_action_mask[idx] > 0:
                     effective_mask[idx] = 1.0
 
         strategy_info = {
             'strategy': strategy,
             'strategy_log_prob': strategy_log_prob,
             'strategy_logits': strategy_logits,
-            'load_balance': high_output['load_balance']
+            'load_balance': high_output['load_balance'],
+            'orientation': orientation
         }
 
         if np.sum(effective_mask[:-1]) > 0:
             # Use PPO agent to select position with masked action space
             ppo_action, ppo_log_prob, ppo_value = self.ppo.select_action(
-                state, effective_mask
+                policy_state, effective_mask
             )
             
             # Return action from PPO - let the policy learn good placement
-            return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info
+            return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info, policy_state
 
         self.rearrange_stats['deadlocks'] += 1
 
         # Deadlock handling: optional repack if no candidate position exists.
         if macro_decision.get('allow_repacking', False) and len(self.env.placed_items) > 0:
-            # Use HighLevelSearcher for deadlock resolution
-            searcher = HighLevelSearcher(
-                self.env,
-                max_depth=20,
-                mcts_budget=50,
-                use_repack=True
-            )
-            env_state = {
-                'items': self.env.items,
-                'current_index': self.env.current_index,
-                'height_map': self.env.height_map,
-                'placed_items': self.env.placed_items,
-                'placed_positions': self.env.placed_positions
-            }
-            search_result = searcher.search(env_state)
-            if search_result.get('success', False):
+            repack_result = self.env.perform_repack(strategy='auto')
+            if repack_result.get('success', False):
                 # Recompute state and mask after repacking.
-                state, action_mask = self.env._get_state_and_mask()
+                policy_state, policy_action_mask = self.env._get_state_and_mask(
+                    orientation=orientation
+                )
                 candidate_actions = self.candidate_generator.generate_from_macro(
-                    action_mask,
+                    policy_action_mask,
                     macro_decision=macro_decision,
                     top_k=128
                 )
-                effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+                effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
                 for idx in candidate_actions:
-                    if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                    if 0 <= idx < self.env.L * self.env.W and policy_action_mask[idx] > 0:
                         effective_mask[idx] = 1.0
 
                 if np.sum(effective_mask[:-1]) > 0:
-                    action, log_prob, value = self.ppo.select_action(state, effective_mask)
-                    return action, log_prob, value, effective_mask, strategy_info
+                    action, log_prob, value = self.ppo.select_action(policy_state, effective_mask)
+                    return action, log_prob, value, effective_mask, strategy_info, policy_state
 
         # If still deadlocked, use MCTS as planner fallback.
         mcts = MCTS(self.env, budget=self.mcts_budget)
@@ -278,35 +273,37 @@ class TrainingLoop:
         self.rearrange_stats['rearrange_unpack_depth_sum'] += float(len(rearr_result.get('best_sequence', [])))
 
         if rearr_result.get('applied', False):
-            state, action_mask = self.env._get_state_and_mask()
+            policy_state, policy_action_mask = self.env._get_state_and_mask(
+                orientation=orientation
+            )
             candidate_actions = self.candidate_generator.generate_from_macro(
-                action_mask,
+                policy_action_mask,
                 macro_decision=macro_decision,
                 top_k=128
             )
-            effective_mask = np.zeros_like(action_mask, dtype=np.float32)
+            effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
             for idx in candidate_actions:
-                if 0 <= idx < self.env.L * self.env.W and action_mask[idx] > 0:
+                if 0 <= idx < self.env.L * self.env.W and policy_action_mask[idx] > 0:
                     effective_mask[idx] = 1.0
 
             if np.sum(effective_mask[:-1]) > 0:
-                action, log_prob, value = self.ppo.select_action(state, effective_mask)
-                return action, log_prob, value, effective_mask, strategy_info
+                action, log_prob, value = self.ppo.select_action(policy_state, effective_mask)
+                return action, log_prob, value, effective_mask, strategy_info, policy_state
 
-        mcts_result = mcts.search(state, action_mask, depth_limit=5)
+        mcts_result = mcts.search(policy_state, policy_action_mask, depth_limit=5)
         self.rearrange_stats['mcts_fallback_used'] += 1
         mcts_action = int(mcts_result['best_action'])
 
         # Ensure selected action is legal.
-        if 0 <= mcts_action < len(action_mask) and action_mask[mcts_action] > 0:
+        if 0 <= mcts_action < len(policy_action_mask) and policy_action_mask[mcts_action] > 0:
             action = mcts_action
         else:
-            valid_actions = np.where(np.asarray(action_mask) > 0)[0]
+            valid_actions = np.where(np.asarray(policy_action_mask) > 0)[0]
             action = int(valid_actions[0]) if len(valid_actions) > 0 else self.env.L * self.env.W
 
         # Compute log_prob and value for the chosen fallback action.
-        log_prob, value = self._compute_logprob_value_for_action(state, action_mask, action)
-        return action, log_prob, value, np.asarray(action_mask, dtype=np.float32), strategy_info
+        log_prob, value = self._compute_logprob_value_for_action(policy_state, policy_action_mask, action)
+        return action, log_prob, value, np.asarray(policy_action_mask, dtype=np.float32), strategy_info, policy_state
 
     def _compute_logprob_value_for_action(self, state, action_mask, action):
         """Compute log probability and value for a fixed action under current PPO policy."""
@@ -474,16 +471,18 @@ class TrainingLoop:
         
         while steps_collected < n_steps:
             # Select action with hierarchical control (sample strategies for training).
-            action, log_prob, value, effective_mask, strategy_info = self._select_hierarchical_action(
+            action, log_prob, value, effective_mask, strategy_info, policy_state = self._select_hierarchical_action(
                 state, action_mask, sample_strategy=True
             )
             
             # Take step in environment
-            (next_state, next_mask), reward, done, info = self.env.step(action)
+            (next_state, next_mask), reward, done, info = self.env.step(
+                (action, strategy_info.get('orientation', 0))
+            )
             
             # Store PPO transition
             self.ppo.store_transition(
-                state=state,
+                state=policy_state,
                 action=action,
                 reward=reward,
                 value=value,
@@ -540,7 +539,7 @@ class TrainingLoop:
         
         # Get next value untuk GAE bootstrap
         if not done:
-            _, _, next_value, _, _ = self._select_hierarchical_action(
+            _, _, next_value, _, _, _ = self._select_hierarchical_action(
                 state, action_mask, sample_strategy=False
             )
         else:

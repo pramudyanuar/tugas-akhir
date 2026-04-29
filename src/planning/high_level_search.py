@@ -62,7 +62,8 @@ class HighLevelSearcher:
         self.tree_expander = TreeExpander(env, max_depth, reward_weights)
         self.repack_trial = RepackTrial(
             container_dims=(env.L, env.W, env.H),
-            time_limit=5.0
+            time_limit=5.0,
+            env=env,
         )
 
     def search(self, env_state):
@@ -307,7 +308,24 @@ class HighLevelSearcher:
         # Update height map
         height_map = new_state.get('height_map')
         if height_map is not None:
-            height_map[x:x+l, y:y+w] = z + h
+            if hasattr(height_map, 'update_region'):
+                height_map.update_region(x, y, l, w, z + h)
+            else:
+                height_map[x:x+l, y:y+w] = z + h
+
+        # Track placement for utilization
+        placed_items = new_state.get('placed_items')
+        placed_positions = new_state.get('placed_positions')
+
+        if placed_items is None:
+            placed_items = []
+            new_state['placed_items'] = placed_items
+        if placed_positions is None:
+            placed_positions = []
+            new_state['placed_positions'] = placed_positions
+
+        placed_items.append((l, w, h))
+        placed_positions.append((x, y, z))
 
         return new_state
 

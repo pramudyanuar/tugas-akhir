@@ -12,6 +12,12 @@ Main Features:
 import numpy as np
 import time
 import copy
+import itertools
+from types import SimpleNamespace
+
+from .tree_expansion import TreeExpander
+from src.core.height_map import HeightMap
+from src.core.lbcp import validate_structural_stability, update_feasibility_map
 
 
 class RepackTrial:
@@ -51,7 +57,8 @@ class RepackTrial:
         27. return a*, RepackSuccess
     """
 
-    def __init__(self, container_dims=(59, 23, 23), time_limit=5.0):
+    def __init__(self, container_dims=(59, 23, 23), time_limit=5.0,
+                 env=None, max_depth=20, reward_weights=None):
         """
         Initialize RepackTrial.
 
@@ -62,6 +69,19 @@ class RepackTrial:
         self.L, self.W, self.H = container_dims
         self.container_volume = self.L * self.W * self.H
         self.time_limit = time_limit
+
+        # Use provided env when available; fallback to a minimal proxy.
+        if env is None:
+            env = SimpleNamespace(
+                L=self.L,
+                W=self.W,
+                H=self.H,
+                action_mask_calculator=None,
+                use_structural_validation=False,
+                cog_tolerance=0.15,
+            )
+        self.env = env
+        self.tree_expander = TreeExpander(self.env, max_depth=max_depth, reward_weights=reward_weights)
 
     def attempt_repack(self, env_state, require_full_pack=False):
         """
@@ -87,10 +107,12 @@ class RepackTrial:
         """
         start_time = time.time()
         best_actions = []
+        best_positions = None
         best_util = self._compute_utilization(env_state)
         success = False
 
         placed_items = env_state.get('placed_items', [])
+        placed_positions = env_state.get('placed_positions', [])
         num_items = len(placed_items)
 
         if num_items == 0:
@@ -105,56 +127,72 @@ class RepackTrial:
         # Line 2: while time limit not reached
         while (time.time() - start_time) < self.time_limit:
             # Line 3: for i <- 1 to |I|
-            for i in range(1, min(num_items + 1, 5)):  # Limit to 4 items max for speed
-                # Time check
+            for i in range(1, num_items + 1):
                 if (time.time() - start_time) >= self.time_limit:
                     break
 
                 # Line 4: for each subset U with i elements (last-packed-first)
-                subsets = self._generate_subsets_last_packed_first(
-                    placed_items, i, num_items
-                )
-
-                for subset_indices in subsets:
-                    # Time check
+                for subset_indices in self._iter_subsets_last_packed_first(num_items, i):
                     if (time.time() - start_time) >= self.time_limit:
                         break
 
                     # Line 5: Clone environment state
-                    cloned_state = copy.deepcopy(env_state)
-
-                    # Line 6-9: Execute unpack for each item in subset
-                    unpack_actions = []
-                    for item_idx in subset_indices:
-                        unpack_actions.append(('unpack', item_idx))
-
-                    # Line 10: Tree expansion (simplified greedy placement)
-                    repack_result = self._tree_expansion_greedy(
-                        cloned_state, subset_indices
+                    cloned_state, positions_by_index = self._build_repack_state(
+                        env_state,
+                        subset_indices,
                     )
 
-                    if repack_result['success']:
-                        # Line 18-21: Check if better utilization or full pack achieved
-                        new_util = repack_result.get('utilization', best_util)
+                    # Line 6-9: Execute unpack for each item in subset
+                    unpack_actions = [('unpack', idx) for idx in subset_indices]
 
-                        if require_full_pack and repack_result.get('full_pack', False):
-                            # Line 16-17: Full pack achieved
-                            success = True
-                            best_actions = unpack_actions + repack_result.get('actions', [])
-                            best_util = new_util
-                            elapsed = time.time() - start_time
-                            return {
-                                'success': True,
-                                'actions': best_actions,
-                                'best_util': best_util,
-                                'items_unpacked': len(subset_indices),
-                                'time_elapsed': elapsed
-                            }
-                        elif not require_full_pack and new_util > best_util:
-                            # Line 20: Better utilization found
-                            success = True
-                            best_actions = unpack_actions + repack_result.get('actions', [])
-                            best_util = new_util
+                    # Line 10: Tree expansion
+                    sequences, solved = self.tree_expander.tree_expansion(
+                        cloned_state,
+                        placements_tried=set(),
+                        sequence=None,
+                        depth=0,
+                        node_count=0,
+                        require_full_pack=require_full_pack,
+                    )
+
+                    if not sequences:
+                        continue
+
+                    # Line 12: Simulation and generation
+                    simulations = self._simulate_sequences(sequences, cloned_state)
+
+                    # Line 13: Best action selection
+                    best_sequence, best_actions = self._select_best_action(sequences, simulations)
+                    sim_result = simulations.get(id(best_sequence), {})
+                    new_util = sim_result.get('utilization', best_util)
+                    final_state = sim_result.get('final_state')
+                    has_no_position = any(p[2] is None for p in best_sequence)
+
+                    if final_state is None:
+                        continue
+
+                    final_positions = final_state.get('positions_by_index', positions_by_index)
+
+                    # Line 15-21: Full pack or improved utilization
+                    if require_full_pack and not has_no_position:
+                        success = True
+                        best_actions = unpack_actions + best_actions
+                        best_util = new_util
+                        elapsed = time.time() - start_time
+                        return {
+                            'success': True,
+                            'actions': best_actions,
+                            'best_util': best_util,
+                            'items_unpacked': len(subset_indices),
+                            'time_elapsed': elapsed,
+                            'positions': final_positions,
+                        }
+
+                    if not require_full_pack and new_util > best_util:
+                        success = True
+                        best_actions = unpack_actions + best_actions
+                        best_util = new_util
+                        best_positions = final_positions
 
         elapsed = time.time() - start_time
         return {
@@ -162,126 +200,319 @@ class RepackTrial:
             'actions': best_actions,
             'best_util': best_util,
             'items_unpacked': len(best_actions),
-            'time_elapsed': elapsed
+            'time_elapsed': elapsed,
+            'positions': best_positions if success else None,
         }
 
-    def _generate_subsets_last_packed_first(self, items, subset_size, total_items):
+    def _iter_subsets_last_packed_first(self, total_items, subset_size):
         """
-        Generate subsets dengan last-packed-first strategy.
+        Generate subsets with last-packed-first priority.
 
-        Items yang di-unpack adalah yang paling akhir di-pack (highest indices).
-
-        Args:
-            items (list): All placed items
-            subset_size (int): Size of subset
-            total_items (int): Total number of items
-
-        Returns:
-            list: List of subset index combinations (last-packed-first)
+        Yields index lists ordered by most recently packed items first.
         """
-        subsets = []
+        if subset_size <= 0 or subset_size > total_items:
+            return
 
-        # Generate combinations starting dari last items (highest indices)
-        # For simplicity, use greedy: last k items
-        if subset_size <= total_items:
-            # Last subset_size items
-            last_indices = list(range(total_items - subset_size, total_items))
-            subsets.append(last_indices)
+        indices = list(range(total_items - 1, -1, -1))
+        for combo in itertools.combinations(indices, subset_size):
+            yield list(sorted(combo, reverse=True))
 
-        return subsets
+    def _build_repack_state(self, env_state, unpacked_indices):
+        """Clone state and rebuild maps after unpacking selected items."""
+        cloned_state = copy.deepcopy(env_state)
 
-    def _tree_expansion_greedy(self, cloned_state, unpacked_indices):
-        """
-        Simplified tree expansion menggunakan greedy placement.
-
-        Args:
-            cloned_state (dict): Cloned environment state
-            unpacked_indices (list): Indices dari items yang di-unpack
-
-        Returns:
-            dict: {
-                'success': bool,
-                'actions': list of placement actions,
-                'utilization': float,
-                'full_pack': bool
-            }
-        """
-        # Create new height map dan place remaining items
-        from src.core.height_map import HeightMap
-        from src.core.lbcp import is_stable
-
-        height_map = HeightMap(self.L, self.W, self.H)
-        
         placed_items = cloned_state.get('placed_items', [])
         placed_positions = cloned_state.get('placed_positions', [])
+        total_items = len(placed_items)
 
-        # Re-place all items except unpacked ones
-        new_positions = []
-        successful_placements = 0
-        
-        for idx, (item, old_pos) in enumerate(zip(placed_items, placed_positions)):
+        remaining_items = []
+        remaining_positions = []
+        positions_by_index = [None] * total_items
+
+        for idx, (item, pos) in enumerate(zip(placed_items, placed_positions)):
             if idx in unpacked_indices:
-                # Skip unpacked items
                 continue
+            remaining_items.append(item)
+            remaining_positions.append(pos)
+            positions_by_index[idx] = pos
 
-            l, w, h = item
-            
-            # Find best position untuk item ini
-            placed = False
-            for z in range(self.H - h + 1):
-                if placed:
-                    break
-                for y in range(self.W - w + 1):
-                    if placed:
-                        break
-                    for x in range(self.L - l + 1):
-                        # Check stability
-                        region_max = np.max(height_map.get_region(x, y, l, w))
-                        if region_max + h <= self.H:
-                            # Place item
-                            height_map.update_region(x, y, l, w, region_max + h)
-                            new_positions.append((x, y, region_max))
-                            successful_placements += 1
-                            placed = True
-                            break
+        # Rebuild height map and feasibility map from remaining items
+        height_map = HeightMap(self.L, self.W, self.H)
+        feasibility_map = np.ones((self.L, self.W), dtype=bool)
 
-        # Try to place unpacked items
-        unpacked_items = [placed_items[i] for i in unpacked_indices]
-        unpacked_placed = 0
+        for (item_l, item_w, item_h), (x, y, base_height) in zip(remaining_items, remaining_positions):
+            support_polygon = None
+            if getattr(self.env, 'use_structural_validation', False):
+                obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
+                valid, support_polygon, _ = validate_structural_stability(
+                    obj_payload,
+                    None,
+                    height_map.map,
+                    feasibility_map,
+                    getattr(self.env, 'cog_tolerance', 0.15),
+                )
+                if not valid:
+                    # Skip feasibility update if validation fails
+                    support_polygon = None
 
-        for item in unpacked_items:
-            l, w, h = item
-            placed = False
+            height_map.update_region(x, y, item_l, item_w, base_height + item_h)
+            if support_polygon is not None:
+                feasibility_map = update_feasibility_map(feasibility_map, support_polygon)
 
-            for z in range(self.H - h + 1):
-                if placed:
-                    break
-                for y in range(self.W - w + 1):
-                    if placed:
-                        break
-                    for x in range(self.L - l + 1):
-                        region_max = np.max(height_map.get_region(x, y, l, w))
-                        if region_max + h <= self.H:
-                            height_map.update_region(x, y, l, w, region_max + h)
-                            new_positions.append((x, y, region_max))
-                            unpacked_placed += 1
-                            placed = True
-                            break
+        # Items to place: unpacked items
+        repack_items = [placed_items[idx] for idx in unpacked_indices]
+        repack_indices = list(unpacked_indices)
 
-        # Compute new utilization
-        total_volume = sum(item[0] * item[1] * item[2] for item in placed_items)
-        new_util = total_volume / self.container_volume
+        cloned_state['height_map'] = height_map
+        cloned_state['feasibility_map'] = feasibility_map
+        cloned_state['placed_items'] = remaining_items.copy()
+        cloned_state['placed_positions'] = remaining_positions.copy()
+        cloned_state['items'] = repack_items
+        cloned_state['item_indices'] = repack_indices
+        cloned_state['positions_by_index'] = positions_by_index
+        cloned_state['current_index'] = 0
 
-        success = (successful_placements + unpacked_placed) == len(placed_items)
-        full_pack = unpacked_placed == len(unpacked_items)
+        return cloned_state, positions_by_index
+
+    def _simulate_sequences(self, sequences, env_state):
+        simulations = {}
+        for sequence in sequences:
+            sim_result = self._simulate_single_sequence(sequence, env_state)
+            simulations[id(sequence)] = sim_result
+        return simulations
+
+    def _simulate_single_sequence(self, sequence, env_state):
+        sim_state = copy.deepcopy(env_state)
+
+        for placement in sequence:
+            if len(placement) >= 3:
+                item_idx, phi, action = placement[0], placement[1], placement[2]
+                if action is not None:
+                    sim_state = self._apply_placement(sim_state, item_idx, phi, action)
+
+        util = self._compute_utilization(sim_state)
+        reward = util * 100.0 - len(sequence) * 0.5
 
         return {
-            'success': success,
-            'actions': [],  # Could be populated dengan placement actions
-            'utilization': new_util,
-            'full_pack': full_pack,
-            'positions': new_positions
+            'utilization': util,
+            'reward': reward,
+            'sequence_length': len(sequence),
+            'final_state': sim_state,
         }
+
+    def _select_best_action(self, sequences, simulations):
+        best_sequence = None
+        best_reward = -np.inf
+        best_action = None
+        best_actions = []
+
+        for sequence in sequences:
+            sim_key = id(sequence)
+            if sim_key not in simulations:
+                continue
+            sim = simulations[sim_key]
+            reward = sim.get('reward', 0.0)
+            if reward > best_reward:
+                best_reward = reward
+                best_sequence = sequence
+                if len(sequence) > 0:
+                    placement = sequence[0]
+                    if len(placement) >= 3:
+                        item_idx, phi, action = placement[0], placement[1], placement[2]
+                        best_action = (item_idx, phi, action)
+
+        if best_sequence is None:
+            return None, []
+
+        if best_action is None:
+            best_action = ('no_position',)
+
+        sim = simulations.get(id(best_sequence), {})
+        final_state = sim.get('final_state') if sim else None
+        item_indices = final_state.get('item_indices') if final_state else None
+
+        for placement in best_sequence:
+            if len(placement) < 3:
+                continue
+            item_idx, phi, action = placement[0], placement[1], placement[2]
+            if action is None:
+                continue
+            original_idx = item_indices[item_idx] if item_indices and item_idx < len(item_indices) else item_idx
+            best_actions.append(('place', original_idx, phi, action))
+
+        return best_sequence, best_actions
+
+    def _apply_placement(self, state, item_idx, phi, action):
+        new_state = copy.deepcopy(state)
+
+        if action is None:
+            return new_state
+
+        x, y, z = action
+        items = new_state.get('items', [])
+        if item_idx >= len(items):
+            return new_state
+
+        l, w, h = items[item_idx]
+        if phi == 1:
+            l, w = w, l
+
+        # Update height map
+        height_map = new_state.get('height_map')
+        if height_map is not None:
+            if hasattr(height_map, 'update_region'):
+                height_map.update_region(x, y, l, w, z + h)
+            else:
+                height_map[x:x+l, y:y+w] = z + h
+
+        # Update feasibility map if enabled
+        if (
+            getattr(self.env, 'use_structural_validation', False)
+            and new_state.get('feasibility_map') is not None
+            and height_map is not None
+        ):
+            try:
+                obj_payload = {'x': x, 'y': y, 'w': l, 'd': w}
+                valid, support_polygon, _ = validate_structural_stability(
+                    obj_payload,
+                    None,
+                    height_map.map if hasattr(height_map, 'map') else height_map,
+                    new_state.get('feasibility_map'),
+                    getattr(self.env, 'cog_tolerance', 0.15),
+                )
+                if valid and support_polygon is not None and len(support_polygon) >= 3:
+                    new_state['feasibility_map'] = update_feasibility_map(
+                        new_state.get('feasibility_map'),
+                        support_polygon,
+                    )
+            except Exception:
+                pass
+
+        # Track placed items/positions
+        placed_items = new_state.get('placed_items')
+        placed_positions = new_state.get('placed_positions')
+        if placed_items is None:
+            placed_items = []
+            new_state['placed_items'] = placed_items
+        if placed_positions is None:
+            placed_positions = []
+            new_state['placed_positions'] = placed_positions
+
+        placed_items.append((l, w, h))
+        placed_positions.append((x, y, z))
+
+        # Update positions_by_index mapping
+        item_indices = new_state.get('item_indices', [])
+        positions_by_index = new_state.get('positions_by_index')
+        if positions_by_index is not None and item_idx < len(item_indices):
+            original_idx = item_indices[item_idx]
+            positions_by_index[original_idx] = (x, y, z)
+
+        return new_state
+
+    def attempt_repack_bottom_left_fill(self, items, positions):
+        """Legacy helper: simple bottom-left-fill repacking."""
+        success, new_positions, max_height = self._bottom_left_fill(items)
+        return success, new_positions, max_height
+
+    def attempt_repack_load_balanced(self, items, positions):
+        """Legacy helper: load-balanced repacking (uses BLF baseline)."""
+        success, new_positions, max_height = self._bottom_left_fill(items)
+        utilization = self._compute_utilization_from_items(items)
+        metric = utilization if success else 0.0
+        return success, new_positions, metric
+
+    def attempt_repack_minimize_height(self, items, positions):
+        """Legacy helper: minimize max height (uses BLF baseline)."""
+        success, new_positions, max_height = self._bottom_left_fill(items)
+        metric = max_height if success else float('inf')
+        return success, new_positions, metric
+
+    def auto_repack(self, items, positions, strategy='auto'):
+        """Legacy helper: choose repack strategy and return dict result."""
+        if strategy == 'load_balanced':
+            success, new_positions, metric = self.attempt_repack_load_balanced(items, positions)
+            return {
+                'success': success,
+                'positions': new_positions,
+                'metric': metric,
+                'strategy': 'load_balanced',
+            }
+        if strategy == 'min_height':
+            success, new_positions, metric = self.attempt_repack_minimize_height(items, positions)
+            return {
+                'success': success,
+                'positions': new_positions,
+                'metric': metric,
+                'strategy': 'min_height',
+            }
+        if strategy == 'blf':
+            success, new_positions, metric = self.attempt_repack_bottom_left_fill(items, positions)
+            return {
+                'success': success,
+                'positions': new_positions,
+                'metric': metric,
+                'strategy': 'blf',
+            }
+
+        # Auto: pick best by lowest height, fallback to utilization
+        lb_success, lb_positions, lb_metric = self.attempt_repack_load_balanced(items, positions)
+        mh_success, mh_positions, mh_metric = self.attempt_repack_minimize_height(items, positions)
+
+        if mh_success:
+            return {
+                'success': True,
+                'positions': mh_positions,
+                'metric': mh_metric,
+                'strategy': 'min_height',
+            }
+        if lb_success:
+            return {
+                'success': True,
+                'positions': lb_positions,
+                'metric': lb_metric,
+                'strategy': 'load_balanced',
+            }
+
+        return {
+            'success': False,
+            'positions': [],
+            'metric': 0.0,
+            'strategy': 'auto',
+        }
+
+    def _bottom_left_fill(self, items):
+        """Place items in bottom-left order using first-fit scanning."""
+        if not items:
+            return True, [], 0.0
+
+        height_map = HeightMap(self.L, self.W, self.H)
+        new_positions = []
+
+        for item_l, item_w, item_h in items:
+            placed = False
+            for x in range(self.L - item_l + 1):
+                if placed:
+                    break
+                for y in range(self.W - item_w + 1):
+                    region_max = np.max(height_map.get_region(x, y, item_l, item_w))
+                    if region_max + item_h <= self.H:
+                        height_map.update_region(x, y, item_l, item_w, region_max + item_h)
+                        new_positions.append((x, y, int(region_max)))
+                        placed = True
+                        break
+
+            if not placed:
+                return False, new_positions, float('inf')
+
+        max_height = float(np.max(height_map.map))
+        return True, new_positions, max_height
+
+    def _compute_utilization_from_items(self, items):
+        if not items:
+            return 0.0
+        total_volume = sum(item[0] * item[1] * item[2] for item in items)
+        return total_volume / self.container_volume
 
     def _compute_utilization(self, env_state):
         """

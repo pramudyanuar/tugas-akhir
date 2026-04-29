@@ -274,10 +274,15 @@ class EvaluationMetrics:
             strategy = model_high.select_strategy(high_output['strategy_logits'])
 
             macro_decision = model_high.decode_macro_decision(strategy)
+            orientation = macro_decision.get('orientation', 0)
+
+            policy_state, policy_action_mask = env._get_state_and_mask(
+                orientation=orientation
+            )
 
             # Candidate generation + feasibility masking
             candidate_actions = candidate_generator.generate_from_macro(
-                action_mask,
+                policy_action_mask,
                 macro_decision=macro_decision,
                 top_k=128
             )
@@ -287,7 +292,7 @@ class EvaluationMetrics:
                 action = self._select_low_level_action(
                     env,
                     model_low,
-                    action_mask,
+                    policy_action_mask,
                     candidate_actions
                 )
             else:
@@ -295,25 +300,13 @@ class EvaluationMetrics:
                 action = env.L * env.W  # default: skip action
 
                 if macro_decision.get('allow_repacking', False) and len(env.placed_items) > 0:
-                    # Use HighLevelSearcher for deadlock resolution
-                    searcher = HighLevelSearcher(
-                        env,
-                        max_depth=20,
-                        mcts_budget=50,
-                        use_repack=True
-                    )
-                    env_state = {
-                        'items': env.items,
-                        'current_index': env.current_index,
-                        'height_map': env.height_map,
-                        'placed_items': env.placed_items,
-                        'placed_positions': env.placed_positions
-                    }
-                    search_result = searcher.search(env_state)
-                    if search_result.get('success', False):
-                        state, action_mask = env._get_state_and_mask()
+                    repack_result = env.perform_repack(strategy='auto')
+                    if repack_result.get('success', False):
+                        policy_state, policy_action_mask = env._get_state_and_mask(
+                            orientation=orientation
+                        )
                     candidate_actions = candidate_generator.generate_from_macro(
-                        action_mask,
+                        policy_action_mask,
                         macro_decision=macro_decision,
                         top_k=128
                     )
@@ -322,7 +315,7 @@ class EvaluationMetrics:
                         action = self._select_low_level_action(
                             env,
                             model_low,
-                            action_mask,
+                            policy_action_mask,
                             candidate_actions
                         )
 
@@ -344,9 +337,11 @@ class EvaluationMetrics:
                     rearrange_depth_sum += float(len(rearr_result.get('best_sequence', [])))
 
                     if rearr_result.get('applied', False):
-                        state, action_mask = env._get_state_and_mask()
+                        policy_state, policy_action_mask = env._get_state_and_mask(
+                            orientation=orientation
+                        )
                         candidate_actions = candidate_generator.generate_from_macro(
-                            action_mask,
+                            policy_action_mask,
                             macro_decision=macro_decision,
                             top_k=128
                         )
@@ -355,7 +350,7 @@ class EvaluationMetrics:
                             action = self._select_low_level_action(
                                 env,
                                 model_low,
-                                action_mask,
+                                policy_action_mask,
                                 candidate_actions
                             )
 
@@ -367,7 +362,9 @@ class EvaluationMetrics:
                             action = mcts_action
             
             # Execute action
-            (next_state, next_mask), reward, done, info = env.step(action)
+            (next_state, next_mask), reward, done, info = env.step(
+                (action, orientation)
+            )
             episode_reward += reward
             
             state = next_state
