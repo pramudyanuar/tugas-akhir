@@ -17,6 +17,7 @@ from src.core.candidate_generator import CandidateGenerator
 from src.learning.models.high_level_agent import HighLevelAgent
 from src.learning.models.actor_critic import ActorCriticNetwork
 from src.planning.mcts import MCTS
+from src.planning.high_level_search import HighLevelSearcher
 from src.learning.agents.oracle_policy import OraclePolicy, RandomPolicy
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
@@ -273,10 +274,15 @@ class EvaluationMetrics:
             strategy = model_high.select_strategy(high_output['strategy_logits'])
 
             macro_decision = model_high.decode_macro_decision(strategy)
+            orientation = macro_decision.get('orientation', 0)
+
+            policy_state, policy_action_mask = env._get_state_and_mask(
+                orientation=orientation
+            )
 
             # Candidate generation + feasibility masking
             candidate_actions = candidate_generator.generate_from_macro(
-                action_mask,
+                policy_action_mask,
                 macro_decision=macro_decision,
                 top_k=128
             )
@@ -286,7 +292,7 @@ class EvaluationMetrics:
                 action = self._select_low_level_action(
                     env,
                     model_low,
-                    action_mask,
+                    policy_action_mask,
                     candidate_actions
                 )
             else:
@@ -294,10 +300,13 @@ class EvaluationMetrics:
                 action = env.L * env.W  # default: skip action
 
                 if macro_decision.get('allow_repacking', False) and len(env.placed_items) > 0:
-                    env.perform_repack(strategy='load_balanced')
-                    state, action_mask = env._get_state_and_mask()
+                    repack_result = env.perform_repack(strategy='auto')
+                    if repack_result.get('success', False):
+                        policy_state, policy_action_mask = env._get_state_and_mask(
+                            orientation=orientation
+                        )
                     candidate_actions = candidate_generator.generate_from_macro(
-                        action_mask,
+                        policy_action_mask,
                         macro_decision=macro_decision,
                         top_k=128
                     )
@@ -306,7 +315,7 @@ class EvaluationMetrics:
                         action = self._select_low_level_action(
                             env,
                             model_low,
-                            action_mask,
+                            policy_action_mask,
                             candidate_actions
                         )
 
@@ -328,9 +337,11 @@ class EvaluationMetrics:
                     rearrange_depth_sum += float(len(rearr_result.get('best_sequence', [])))
 
                     if rearr_result.get('applied', False):
-                        state, action_mask = env._get_state_and_mask()
+                        policy_state, policy_action_mask = env._get_state_and_mask(
+                            orientation=orientation
+                        )
                         candidate_actions = candidate_generator.generate_from_macro(
-                            action_mask,
+                            policy_action_mask,
                             macro_decision=macro_decision,
                             top_k=128
                         )
@@ -339,7 +350,7 @@ class EvaluationMetrics:
                             action = self._select_low_level_action(
                                 env,
                                 model_low,
-                                action_mask,
+                                policy_action_mask,
                                 candidate_actions
                             )
 
@@ -351,7 +362,9 @@ class EvaluationMetrics:
                             action = mcts_action
             
             # Execute action
-            (next_state, next_mask), reward, done, info = env.step(action)
+            (next_state, next_mask), reward, done, info = env.step(
+                (action, orientation)
+            )
             episode_reward += reward
             
             state = next_state
@@ -591,7 +604,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
         model_low: Low-level agent (if None, create default)
         num_episodes: Number of episodes to evaluate
         use_mcts: Whether to use MCTS planning
-        dataset_type: 'random' atau 'cutting_stock'
+        dataset_type: 'random', 'cutting_stock', 'perfect_pack', or 'perfect_pack_layered'
         save_visualizations: Whether to save visualizations during eval
         
     Returns:

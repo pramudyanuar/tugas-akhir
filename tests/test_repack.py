@@ -1,58 +1,79 @@
-"""Test cases untuk Repacking module."""
+"""Test cases untuk RepackTrial module (Algorithm 3)."""
 
 import pytest
-from src.planning.repack import Repacker
+import numpy as np
+from src.planning.repack_trial import RepackTrial
+from src.core.height_map import HeightMap
 
 
-class TestRepacking:
-    """Test suite for Repacking functionality."""
-
-    @pytest.fixture
-    def repacker(self):
-        """Create repacker instance for testing."""
-        return Repacker(container_dims=(59, 23, 23))
+class TestRepackTrial:
+    """Test suite for RepackTrial (Algorithm 3) functionality."""
 
     @pytest.fixture
-    def test_items(self):
-        """Test items for repacking."""
-        return [
-            (10, 10, 10),  # volume 1000
-            (8, 8, 8),     # volume 512
-            (6, 6, 6),     # volume 216
-            (5, 5, 5),     # volume 125
-        ]
+    def repack_trial(self):
+        """Create RepackTrial instance for testing."""
+        return RepackTrial(container_dims=(59, 23, 23), time_limit=5.0)
 
     @pytest.fixture
-    def test_positions(self):
-        """Test positions for items."""
-        return [
-            (0, 0, 0),
-            (10, 0, 0),
-            (20, 0, 0),
-            (30, 0, 0),
-        ]
+    def test_env_state(self):
+        """Test environment state for repacking."""
+        height_map = HeightMap(59, 23, 23)
+        return {
+            'items': [(10, 10, 10), (8, 8, 8), (6, 6, 6), (5, 5, 5)],
+            'current_index': 4,
+            'height_map': height_map,
+            'placed_items': [(10, 10, 10), (8, 8, 8), (6, 6, 6)],
+            'placed_positions': [(0, 0, 0), (10, 0, 0), (20, 0, 0)]
+        }
 
-    def test_repacker_initialization(self, repacker):
-        """Test repacker initialization."""
-        assert repacker is not None, "Repacker should be initialized"
-        # Check that dimensions are stored
-        assert hasattr(repacker, 'L'), "Should have L dimension"
-        assert hasattr(repacker, 'W'), "Should have W dimension"
-        assert hasattr(repacker, 'H'), "Should have H dimension"
-        assert repacker.L == 59, "Length should be 59"
-        assert repacker.W == 23, "Width should be 23"
-        assert repacker.H == 23, "Height should be 23"
-        assert repacker.container_volume == 59 * 23 * 23, "Container volume should be calculated correctly"
+    def test_repack_trial_initialization(self, repack_trial):
+        """Test RepackTrial initialization."""
+        assert repack_trial is not None, "RepackTrial should be initialized"
+        assert repack_trial.L == 59, "Length should be 59"
+        assert repack_trial.W == 23, "Width should be 23"
+        assert repack_trial.H == 23, "Height should be 23"
+        assert repack_trial.time_limit == 5.0, "Time limit should be 5.0"
 
-    def test_bottom_left_fill_repacking(self, repacker, test_items, test_positions):
-        """Test Bottom-Left-Fill repacking strategy."""
-        success, positions, metric = repacker.attempt_repack_bottom_left_fill(test_items, test_positions)
+    def test_attempt_repack_returns_dict(self, repack_trial, test_env_state):
+        """Test that attempt_repack returns a dictionary with expected keys."""
+        result = repack_trial.attempt_repack(test_env_state, require_full_pack=False)
         
+        assert isinstance(result, dict), "Result should be a dictionary"
+        assert 'success' in result, "Result should have 'success' key"
+        assert 'actions' in result, "Result should have 'actions' key"
+        assert 'best_util' in result, "Result should have 'best_util' key"
+
+    def test_attempt_repack_with_placed_items(self, repack_trial, test_env_state):
+        """Test attempt_repack with already placed items."""
+        result = repack_trial.attempt_repack(test_env_state, require_full_pack=False)
+        
+        # Result should indicate success or failure
+        assert result['success'] in [True, False]
+        # Best utilization should be a number
+        assert isinstance(result['best_util'], (int, float))
+        # Actions should be a list
+        assert isinstance(result['actions'], (list, tuple))
+
+    def test_repack_trial_with_empty_state(self, repack_trial):
+        """Test RepackTrial with empty placed items."""
+        env_state = {
+            'items': [(10, 10, 10)],
+            'current_index': 0,
+            'height_map': HeightMap(59, 23, 23),
+            'placed_items': [],
+            'placed_positions': []
+        }
+        
+        result = repack_trial.attempt_repack(env_state, require_full_pack=False)
+        
+        # With no placed items, repack should not find anything to rearrange
+        assert isinstance(result, dict), "Should return a dictionary"
+        
+        success = result.get('success')
+        metric = result.get('best_util')
+
         assert isinstance(success, bool), "Success should be boolean"
         assert isinstance(metric, (int, float)), "Metric should be numeric"
-        
-        if success:
-            assert len(positions) == len(test_items), "Should have positions for all items"
 
     def test_load_balanced_repacking(self, repacker, test_items, test_positions):
         """Test Load-Balanced repacking strategy."""

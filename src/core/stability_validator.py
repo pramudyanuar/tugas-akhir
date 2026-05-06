@@ -144,3 +144,138 @@ class StabilityValidator:
         
         # Non-strict mode: height check is enough
         return True
+
+    @staticmethod
+    def _compute_cog_set(x, y, l, w, cog_tolerance):
+        """
+        Compute CoG set as a small square around the center point.
+
+        This approximates Eq. 1 tolerance region with axis-aligned offsets.
+        """
+        cx = x + l / 2.0
+        cy = y + w / 2.0
+
+        if cog_tolerance is None or cog_tolerance <= 0:
+            return np.array([[cx, cy]])
+
+        delta = float(cog_tolerance)
+        return np.array(
+            [
+                [cx - delta, cy - delta],
+                [cx - delta, cy + delta],
+                [cx + delta, cy - delta],
+                [cx + delta, cy + delta],
+                [cx, cy],
+            ]
+        )
+
+    @staticmethod
+    def validate(new_object, load_configuration, height_map_t, feasibility_map_t, cog_tolerance):
+        """
+        Algorithm 1: Structural Stability Validation.
+
+        Args:
+            new_object (dict): {'x': xi, 'y': yi, 'w': wi, 'd': di}
+            load_configuration: Unused (kept for compatibility)
+            height_map_t (np.ndarray): Height map at time t
+            feasibility_map_t (np.ndarray): Feasibility map at time t
+            cog_tolerance (float): CoG tolerance delta
+
+        Returns:
+            tuple: (valid, support_polygon, support_height)
+        """
+        if new_object is None:
+            return False, np.array([]).reshape(0, 2), None
+
+        xi = int(new_object.get('x', 0))
+        yi = int(new_object.get('y', 0))
+        wi = int(new_object.get('w', 0))
+        di = int(new_object.get('d', 0))
+
+        if wi <= 0 or di <= 0:
+            return False, np.array([]).reshape(0, 2), None
+
+        hm = height_map_t
+        fm = feasibility_map_t
+
+        region = hm[xi:xi + wi, yi:yi + di]
+        if region.size == 0:
+            return False, np.array([]).reshape(0, 2), None
+
+        # Algorithm 1 line 10: support height is min height in the region.
+        support_height = np.min(region)
+
+        # Algorithm 1 line 11: contact points at support height
+        contact_cells = StabilityValidator.compute_support_cells(
+            hm, xi, yi, wi, di, support_height
+        )
+
+        if contact_cells.size == 0:
+            return False, np.array([]).reshape(0, 2), support_height
+
+        # Algorithm 1 line 12: feasible points within region
+        feasible_cells = []
+        for px in range(xi, xi + wi):
+            for py in range(yi, yi + di):
+                if fm is None or fm[px, py]:
+                    feasible_cells.append([px, py])
+
+        feasible_cells = np.array(feasible_cells) if feasible_cells else np.array([]).reshape(0, 2)
+
+        if feasible_cells.size == 0:
+            return False, np.array([]).reshape(0, 2), support_height
+
+        # Algorithm 1 line 13: intersection of contact and feasible sets
+        contact_set = {tuple(p) for p in contact_cells}
+        feasible_set = {tuple(p) for p in feasible_cells}
+        intersection = contact_set & feasible_set
+        if not intersection:
+            return False, np.array([]).reshape(0, 2), support_height
+
+        support_points = np.array(list(intersection))
+
+        # Compute support polygon (convex hull)
+        try:
+            hull_points, _ = StabilityValidator.compute_convex_hull(support_points)
+        except Exception:
+            return False, np.array([]).reshape(0, 2), support_height
+
+        # Compute CoG set and check containment
+        cog_set = StabilityValidator._compute_cog_set(xi, yi, wi, di, cog_tolerance)
+        path = Path(hull_points)
+        inside_mask = path.contains_points(cog_set)
+        is_valid = bool(np.all(inside_mask))
+
+        return is_valid, hull_points, support_height
+
+    @staticmethod
+    def update_feasibility_map(feasibility_map_t, updated_support_polygon):
+        """
+        Algorithm 2: Structural Stability Update.
+
+        Marks all grid points inside the support polygon as feasible.
+        """
+        if feasibility_map_t is None:
+            return None
+
+        if updated_support_polygon is None or len(updated_support_polygon) < 3:
+            return feasibility_map_t
+
+        fm = np.array(feasibility_map_t, copy=True)
+        L, W = fm.shape
+
+        polygon = np.asarray(updated_support_polygon)
+        path = Path(polygon)
+
+        xs, ys = np.meshgrid(np.arange(L), np.arange(W), indexing='ij')
+        points = np.stack([xs.ravel(), ys.ravel()], axis=1)
+        inside = path.contains_points(points, radius=1e-9)
+        fm.reshape(-1)[inside] = True
+
+        # Ensure polygon vertices are included even if on boundary
+        for vx, vy in polygon:
+            ix, iy = int(round(vx)), int(round(vy))
+            if 0 <= ix < L and 0 <= iy < W:
+                fm[ix, iy] = True
+
+        return fm

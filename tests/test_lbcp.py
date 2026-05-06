@@ -62,3 +62,40 @@ class TestLBCPStability:
         
         # Should return False karena height overflow
         assert result == False, "Should detect height overflow!"
+
+    def test_validate_structural_stability_valid(self):
+        """Validate should accept stable placement on flat feasible region."""
+        height_map = np.zeros((6, 6), dtype=np.int32)
+        feasibility_map = np.ones((6, 6), dtype=bool)
+        obj = {'x': 1, 'y': 1, 'w': 3, 'd': 3}
+
+        valid, hull, support_height = StabilityValidator.validate(
+            obj, None, height_map, feasibility_map, cog_tolerance=0.1
+        )
+
+        assert valid is True, "Expected stable placement on flat feasible region"
+        assert support_height == 0, "Support height should be min height in region"
+        assert len(hull) >= 3, "Hull should have at least 3 points"
+
+    def test_validate_structural_stability_infeasible(self):
+        """Validate should reject placement when feasible set is empty."""
+        height_map = np.zeros((6, 6), dtype=np.int32)
+        feasibility_map = np.zeros((6, 6), dtype=bool)
+        obj = {'x': 1, 'y': 1, 'w': 3, 'd': 3}
+
+        valid, hull, support_height = StabilityValidator.validate(
+            obj, None, height_map, feasibility_map, cog_tolerance=0.1
+        )
+
+        assert valid is False, "Expected invalid placement when no feasible cells"
+        assert len(hull) == 0, "Hull should be empty for invalid placement"
+
+    def test_update_feasibility_map_polygon_fill(self):
+        """Update should mark interior points within support polygon."""
+        feasibility_map = np.zeros((6, 6), dtype=bool)
+        hull_points = np.array([[1, 1], [1, 4], [4, 4], [4, 1]])
+
+        updated = StabilityValidator.update_feasibility_map(feasibility_map, hull_points)
+
+        assert updated[2, 2], "Center point should be marked feasible"
+        assert updated[1, 1], "Vertex should be marked feasible"

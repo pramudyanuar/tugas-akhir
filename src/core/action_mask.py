@@ -4,7 +4,7 @@ import os
 
 # Use relative imports for clean module structure
 from .height_map import HeightMap
-from .lbcp import is_stable
+from .lbcp import is_stable, validate_structural_stability
 
 
 class ActionMask:
@@ -56,11 +56,13 @@ class ActionMask:
         
         return mask
     
-    def mask_overflow(self, item_height, height_map):
+    def mask_overflow(self, item_length, item_width, item_height, height_map):
         """
         Mask overflow: posisi yang akan membuat height melebihi container height.
         
         Args:
+            item_length (int): Panjang item
+            item_width (int): Lebar item
             item_height (int): Tinggi item
             height_map (HeightMap): Current height map
             
@@ -69,16 +71,21 @@ class ActionMask:
         """
         mask = np.ones((self.L, self.W), dtype=bool)
         
-        # Mask posisi dimana base_height + item_height > max_height
+        # Mask posisi dimana base_height (max di footprint) + item_height > max_height
         for x in range(self.L):
             for y in range(self.W):
-                base_height = height_map.map[x, y]
+                if x + item_length > self.L or y + item_width > self.W:
+                    mask[x, y] = False
+                    continue
+                base_height = height_map.max_height_in_region(x, y, item_length, item_width)
                 if base_height + item_height > self.H:
                     mask[x, y] = False
         
         return mask
     
-    def mask_unstable_lbcp(self, item_length, item_width, item_height, height_map):
+    def mask_unstable_lbcp(self, item_length, item_width, item_height, height_map,
+                           feasibility_map=None, use_structural_validation=False,
+                           cog_tolerance=0.15):
         """
         Mask unstable (LBCP): posisi yang akan unstable berdasarkan LBCP validation.
         
@@ -105,21 +112,38 @@ class ActionMask:
                 
                 # Cek LBCP stability
                 try:
-                    is_item_stable = is_stable(
-                        height_map.map,
-                        x, y, item_length, item_width, item_height,
-                        self.H
-                    )
-                    if not is_item_stable:
-                        mask[x, y] = False
+                    if use_structural_validation and feasibility_map is not None:
+                        obj_payload = {'x': x, 'y': y, 'w': item_length, 'd': item_width}
+                        valid, _, _ = validate_structural_stability(
+                            obj_payload,
+                            None,
+                            height_map.map,
+                            feasibility_map,
+                            cog_tolerance,
+                        )
+                        if not valid:
+                            mask[x, y] = False
+                            continue
+                    else:
+                        # Non-structural validation: use relaxed stability check
+                        is_item_stable = is_stable(
+                            height_map.map,
+                            x, y, item_length, item_width, item_height,
+                            self.H,
+                            strict_mode=False,
+                        )
+                        if not is_item_stable:
+                            mask[x, y] = False
                 except Exception:
                     # Jika ada error di LBCP check, mask posisi ini
                     mask[x, y] = False
         
         return mask
     
-    def combine_masks(self, item_length, item_width, item_height, 
-                     height_map, has_valid_position=True):
+    def combine_masks(self, item_length, item_width, item_height,
+                      height_map, has_valid_position=True,
+                      feasibility_map=None, use_structural_validation=False,
+                      cog_tolerance=0.15):
         """
         Combine semua masks dengan logic:
         1. out-of-bound AND
@@ -143,9 +167,16 @@ class ActionMask:
         """
         # Combine semua masks
         mask_bound = self.mask_out_of_bound(item_length, item_width, height_map)
-        mask_overflow = self.mask_overflow(item_height, height_map)
-        mask_unstable = self.mask_unstable_lbcp(item_length, item_width, 
-                                               item_height, height_map)
+        mask_overflow = self.mask_overflow(item_length, item_width, item_height, height_map)
+        mask_unstable = self.mask_unstable_lbcp(
+            item_length,
+            item_width,
+            item_height,
+            height_map,
+            feasibility_map=feasibility_map,
+            use_structural_validation=use_structural_validation,
+            cog_tolerance=cog_tolerance,
+        )
         
         # Combined mask: intersection dari semua mask (AND logic)
         combined_mask = mask_bound & mask_overflow & mask_unstable
@@ -169,7 +200,9 @@ class ActionMask:
         }
     
     def get_action_vector(self, item_length, item_width, item_height,
-                         height_map, include_skip=True):
+                          height_map, include_skip=True,
+                          feasibility_map=None, use_structural_validation=False,
+                          cog_tolerance=0.15):
         """
         Get action vector untuk disimpalin ke neural network.
         
@@ -185,8 +218,15 @@ class ActionMask:
         Returns:
             numpy array: Action mask vector (L*W + 1,) jika include_skip
         """
-        masking_result = self.combine_masks(item_length, item_width, item_height,
-                                          height_map)
+        masking_result = self.combine_masks(
+            item_length,
+            item_width,
+            item_height,
+            height_map,
+            feasibility_map=feasibility_map,
+            use_structural_validation=use_structural_validation,
+            cog_tolerance=cog_tolerance,
+        )
         
         combined_mask = masking_result['combined_mask']
         can_skip = masking_result['can_skip']
