@@ -604,7 +604,7 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
         model_low: Low-level agent (if None, create default)
         num_episodes: Number of episodes to evaluate
         use_mcts: Whether to use MCTS planning
-        dataset_type: 'random' atau 'cutting_stock'
+        dataset_type: 'random', 'cutting_stock', 'perfect_pack', or 'perfect_pack_layered'
         save_visualizations: Whether to save visualizations during eval
         
     Returns:

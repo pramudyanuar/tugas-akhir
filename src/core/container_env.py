@@ -22,7 +22,10 @@ class ContainerEnv:
     
     def __init__(self, container_length=60, container_width=24, container_height=26,
                  max_items=50, seed=None, dataset_type='random',
-                 use_structural_validation=True, cog_tolerance=0.15):
+                 use_structural_validation=True, cog_tolerance=0.15,
+                 layered_min_height=2, layered_max_height=6,
+                 perfect_pack_sigma=4, perfect_pack_size_bias=3.0,
+                 perfect_pack_mean_ratio=0.25):
         """
         Initialize container environment.
         
@@ -32,7 +35,8 @@ class ContainerEnv:
             container_height (int): Tinggi container (default: 26 = 2.6m / 8.5ft)
             max_items (int): Maksimum jumlah items per episode
             seed (int): Random seed untuk reproducibility
-            dataset_type (str): 'random' atau 'cutting_stock'
+            dataset_type (str): 'random', 'cutting_stock', 'perfect_pack',
+                                atau 'perfect_pack_layered'
         """
         self.L = container_length
         self.W = container_width
@@ -41,6 +45,11 @@ class ContainerEnv:
         self.dataset_type = dataset_type
         self.use_structural_validation = use_structural_validation
         self.cog_tolerance = cog_tolerance
+        self.layered_min_height = max(1, int(layered_min_height))
+        self.layered_max_height = max(self.layered_min_height, int(layered_max_height))
+        self.perfect_pack_sigma = perfect_pack_sigma
+        self.perfect_pack_size_bias = perfect_pack_size_bias
+        self.perfect_pack_mean_ratio = perfect_pack_mean_ratio
         
         self.height_map = HeightMap(self.L, self.W, self.H)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
@@ -57,6 +66,18 @@ class ContainerEnv:
                 bin_width=self.L,
                 bin_height=self.W,
                 seed=seed,
+                sigma=self.perfect_pack_sigma,
+                size_bias=self.perfect_pack_size_bias,
+                mean_ratio=self.perfect_pack_mean_ratio,
+            )
+        elif dataset_type == 'perfect_pack_layered':
+            self.dataset_generator = PerfectPackGenerator(
+                bin_width=self.L,
+                bin_height=self.W,
+                seed=seed,
+                sigma=self.perfect_pack_sigma,
+                size_bias=self.perfect_pack_size_bias,
+                mean_ratio=self.perfect_pack_mean_ratio,
             )
         else:
             self.dataset_generator = RandomGenerator(seed=seed)
@@ -70,6 +91,7 @@ class ContainerEnv:
         self.episode_length = 0
         self.placed_items = []
         self.placed_positions = []
+        self.ground_truth_positions = []
         
         # State size: height_map (L*W) + item_dims (3) + min_height_info (1)
         self.state_size = self.L * self.W + 3 + 1
@@ -93,7 +115,20 @@ class ContainerEnv:
             self.dataset_generator.set_seed(seed)
         
         # Generate episode items
-        self.items = self.dataset_generator.generate_episode(num_items=self.max_items)
+        if self.dataset_type == 'perfect_pack':
+            self.items = self.dataset_generator.generate_perfect_pack()
+            self.ground_truth_positions = []
+        elif self.dataset_type == 'perfect_pack_layered':
+            items, positions = self.dataset_generator.generate_layered_perfect_pack_with_positions(
+                container_height=self.H,
+                min_layer_height=self.layered_min_height,
+                max_layer_height=self.layered_max_height,
+            )
+            self.items = items
+            self.ground_truth_positions = positions
+        else:
+            self.items = self.dataset_generator.generate_episode(num_items=self.max_items)
+            self.ground_truth_positions = []
         self.current_index = 0
         
         # Reset metrics

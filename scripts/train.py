@@ -10,7 +10,7 @@ matplotlib.use('Agg')  # Non-interactive backend for server environments
 import matplotlib.pyplot as plt
 
 # Add workspace to path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.core.container_env import ContainerEnv
 from src.core.candidate_generator import CandidateGenerator
@@ -73,7 +73,8 @@ class TrainingLogger:
               f"Reward: {reward:8.4f} | "
               f"Length: {length:3d} | "
               f"Util: {utilization:6.2f}% | "
-              f"Success: {success_rate:5.1f}%")
+              f"Success: {success_rate:5.1f}% | "
+              f"Items: {items_placed}/{total_items}")
 
 
 class TrainingLoop:
@@ -88,7 +89,9 @@ class TrainingLoop:
     """
     
     def __init__(self, env, ppo_agent, n_steps=2048, 
-                 device='cpu', seed=None, debug_actions=False):
+                 device='cpu', seed=None, debug_actions=False,
+                 vis_interval=10, vis_dir='outputs/visualizations',
+                 blf_only=False):
         """
         Initialize training loop.
         
@@ -133,12 +136,13 @@ class TrainingLoop:
         
         self.total_steps = 0
         self.episode_count = 0
+        self.blf_only = bool(blf_only)
         
         # Visualization setup with correct container dimensions
         self.visualizer = ContainerVisualizer(container_dims=(env.L, env.W, env.H))
-        self.vis_dir = Path('outputs/visualizations')
+        self.vis_dir = Path(vis_dir)
         self.vis_dir.mkdir(parents=True, exist_ok=True)
-        self.vis_interval = 10  # Save visualization every N episodes
+        self.vis_interval = max(1, int(vis_interval))  # Save visualization every N episodes
         self.last_vis_episode = 0
 
     def _select_hierarchical_action(self, state, action_mask, sample_strategy=True):
@@ -224,6 +228,17 @@ class TrainingLoop:
         }
 
         if np.sum(effective_mask[:-1]) > 0:
+            if self.blf_only:
+                valid_actions = np.where(np.asarray(effective_mask[:-1]) > 0)[0]
+                if len(valid_actions) > 0:
+                    action = int(valid_actions.min())
+                else:
+                    action = self.env.L * self.env.W
+                log_prob, value = self._compute_logprob_value_for_action(
+                    policy_state, effective_mask, action
+                )
+                return action, log_prob, value, effective_mask, strategy_info, policy_state
+
             # Use PPO agent to select position with masked action space
             ppo_action, ppo_log_prob, ppo_value = self.ppo.select_action(
                 policy_state, effective_mask
@@ -613,7 +628,9 @@ class TrainingLoop:
         print(f"{'='*70}\n")
 
 
-def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', dataset_type='random', debug_mask=False, debug_actions=False):
+def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='random',
+          debug_mask=False, debug_actions=False, vis_interval=10, vis_dir='outputs/visualizations',
+          blf_only=False):
     """
     Main training function.
     
@@ -633,12 +650,16 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
     print("Initializing environment...")
     # 20-foot container: 60×24×26 (decimeter units ≈ 6m × 2.4m × 2.6m)
     env = ContainerEnv(
-        max_items=max_items, 
-        seed=seed, 
+        seed=seed,
         dataset_type=dataset_type,
         container_length=60,    # 20 feet ≈ 6 meters
         container_width=24,     # 8 feet ≈ 2.4 meters
-        container_height=26     # 8.5 feet ≈ 2.6 meters
+        container_height=26,    # 8.5 feet ≈ 2.6 meters
+        layered_min_height=args.layered_min_height,
+        layered_max_height=args.layered_max_height,
+        perfect_pack_sigma=args.pp_sigma,
+        perfect_pack_size_bias=args.pp_size_bias,
+        perfect_pack_mean_ratio=args.pp_mean_ratio,
     )
     env.debug_mask_stats = bool(debug_mask)
     state, action_mask = env.reset()
@@ -649,8 +670,36 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
     print(f"  State size: {state_size}")
     print(f"  Action size: {action_size}")
     print(f"  Container: {env.L} x {env.W} x {env.H}")
-    print(f"  Max items: {max_items}\n")
+    print("")
     print(f"  Dataset type: {dataset_type}\n")
+
+    # Dataset summary (after initial reset)
+    if env.items:
+        dims = np.array(env.items, dtype=np.float32)
+        volumes = dims[:, 0] * dims[:, 1] * dims[:, 2]
+        total_volume = float(np.sum(volumes))
+        container_volume = float(env.L * env.W * env.H)
+        util_percent = (total_volume / container_volume * 100.0) if container_volume > 0 else 0.0
+
+        print("Dataset summary:")
+        print(f"  Items generated: {len(env.items)}")
+        print(f"  Volume utilization (items/box): {util_percent:6.2f}%")
+        print(f"  L min/mean/max: {dims[:, 0].min():.0f}/{dims[:, 0].mean():.2f}/{dims[:, 0].max():.0f}")
+        print(f"  W min/mean/max: {dims[:, 1].min():.0f}/{dims[:, 1].mean():.2f}/{dims[:, 1].max():.0f}")
+        print(f"  H min/mean/max: {dims[:, 2].min():.0f}/{dims[:, 2].mean():.2f}/{dims[:, 2].max():.0f}")
+
+        if env.dataset_type == 'perfect_pack_layered' and env.ground_truth_positions:
+            layer_map = {}
+            for (l, w, h), (x, y, z) in zip(env.items, env.ground_truth_positions):
+                layer_map[z] = max(layer_map.get(z, 0), int(h))
+            layer_heights = np.array(list(layer_map.values()), dtype=np.float32)
+            if layer_heights.size > 0:
+                print(f"  Layers: {len(layer_heights)}")
+                print(
+                    "  Layer height min/mean/max: "
+                    f"{layer_heights.min():.0f}/{layer_heights.mean():.2f}/{layer_heights.max():.0f}"
+                )
+        print("")
     
     # Initialize PPO agent
     print("Initializing PPO agent...")
@@ -676,7 +725,10 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
         n_steps=n_steps,
         device=device,
         seed=seed,
-        debug_actions=debug_actions
+        debug_actions=debug_actions,
+        vis_interval=vis_interval,
+        vis_dir=vis_dir,
+        blf_only=blf_only,
     )
     
     # Training loop
@@ -750,30 +802,47 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train PPO agent for 3D bin packing')
     parser.add_argument('--num_epochs', type=int, default=10, help='Number of training epochs')
     parser.add_argument('--n_steps', type=int, default=2048, help='Steps per epoch')
-    parser.add_argument('--max_items', type=int, default=20, help='Max items per episode')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
-    parser.add_argument('--dataset', type=str, default='random', help='Dataset: random or cutting_stock')
+    parser.add_argument('--dataset', type=str, default='perfect_pack_layered', help='Dataset: perfect_pack_layered only')
+    parser.add_argument('--layered-min-height', type=int, default=2, help='Min layer height for perfect_pack_layered')
+    parser.add_argument('--layered-max-height', type=int, default=6, help='Max layer height for perfect_pack_layered')
+    parser.add_argument('--pp-sigma', type=float, default=4, help='Perfect pack Gaussian sigma')
+    parser.add_argument('--pp-size-bias', type=float, default=3.0, help='Perfect pack size bias')
+    parser.add_argument('--pp-mean-ratio', type=float, default=0.25, help='Perfect pack mean ratio')
     parser.add_argument('--debug-mask', action='store_true', help='Print action mask stats per step')
     parser.add_argument('--debug-actions', action='store_true', help='Print chosen action stats per step')
+    parser.add_argument('--vis-interval', type=int, default=10, help='Save visualization every N episodes')
+    parser.add_argument('--vis-dir', type=str, default='outputs/visualizations', help='Visualization output directory')
+    parser.add_argument('--blf-only', action='store_true', help='Use Bottom-Left-Fill position selection')
     
     args = parser.parse_args()
     
     print("\n" + "="*70)
     print("3D BIN PACKING WITH PPO TRAINING")
     print("="*70)
-    print(f"Config: epochs={args.num_epochs}, steps={args.n_steps}, items={args.max_items}, dataset={args.dataset}\n")
+    if args.dataset != 'perfect_pack_layered':
+        raise ValueError("Training hanya mendukung dataset 'perfect_pack_layered'.")
+
+    print(
+        f"Config: epochs={args.num_epochs}, steps={args.n_steps}, "
+        f"dataset={args.dataset}, sigma={args.pp_sigma}, size_bias={args.pp_size_bias}, "
+        f"mean_ratio={args.pp_mean_ratio}, layers={args.layered_min_height}-{args.layered_max_height}, "
+        f"vis_interval={args.vis_interval}, blf_only={args.blf_only}\n"
+    )
     
     # Train with parsed arguments
     training_loop, ppo = train(
         num_epochs=args.num_epochs,
         n_steps=args.n_steps,
-        max_items=args.max_items,
         seed=args.seed,
         device=args.device,
         dataset_type=args.dataset,
         debug_mask=args.debug_mask,
-        debug_actions=args.debug_actions
+        debug_actions=args.debug_actions,
+        vis_interval=args.vis_interval,
+        vis_dir=args.vis_dir,
+        blf_only=args.blf_only,
     )
     
     print("\nTraining completed successfully!")
