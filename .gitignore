@@ -19,3 +19,8 @@ logs/example_training/
 # Generated figures
 visualizations/
 visualizations_optimized/
+
+# Allow committed visualization outputs
+outputs/*
+!outputs/visualizations/
+!outputs/visualizations/**

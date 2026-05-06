@@ -30,7 +30,7 @@ class PerfectPackGenerator:
     4. Shuffle dan return item set
     """
 
-    def __init__(self, bin_width=23, bin_height=23, sigma=2, seed=None):
+    def __init__(self, bin_width=23, bin_height=23, sigma=2, seed=None, size_bias=0.0, mean_ratio=0.5):
         """
         Initialize PerfectPackGenerator.
 
@@ -38,11 +38,15 @@ class PerfectPackGenerator:
             bin_width (int): Width container W
             bin_height (int): Height container H
             sigma (float): Standard deviation untuk Gaussian distribution (default: 2)
+            size_bias (float): Bias ke ukuran kecil (>0) atau besar (<0) (default: 0)
+            mean_ratio (float): Posisi mean Gaussian relatif terhadap dmax (0-1)
             seed (int, optional): Random seed untuk reproducibility
         """
         self.W = bin_width
         self.H = bin_height
         self.sigma = sigma
+        self.size_bias = float(size_bias)
+        self.mean_ratio = float(mean_ratio)
         self.container_volume = self.W * self.H
         self.rng = np.random.RandomState(seed)
         
@@ -78,7 +82,105 @@ class PerfectPackGenerator:
 
         return best_items if best_items else []
 
-    def _generate_single_attempt(self):
+    def generate_perfect_pack_with_positions(self, num_attempts=3, shuffle=False):
+        """
+        Generate perfect packing dengan positions (ground truth placement).
+
+        Args:
+            num_attempts (int): Jumlah attempt untuk perfection
+            shuffle (bool): Shuffle pasangan (item, position) jika True
+
+        Returns:
+            tuple: (items, positions)
+                - items: list of (length, width, height)
+                - positions: list of (x, y, z)
+        """
+        best_items = None
+        best_positions = None
+        best_util = 0.0
+
+        for _ in range(num_attempts):
+            items, positions = self._generate_single_attempt(return_positions=True)
+            area = sum(item[0] * item[1] for item in items)
+            util = area / self.container_volume
+
+            if util >= 0.99:
+                return self._maybe_shuffle(items, positions, shuffle)
+
+            if util > best_util:
+                best_util = util
+                best_items = items
+                best_positions = positions
+
+        if best_items is None:
+            return [], []
+
+        return self._maybe_shuffle(best_items, best_positions, shuffle)
+
+    def generate_layered_perfect_pack_with_positions(
+        self,
+        container_height,
+        min_layer_height=2,
+        max_layer_height=6,
+        num_attempts=3,
+        shuffle=False,
+    ):
+        """
+        Generate layered perfect pack for full 3D utilization with varied heights.
+
+        Args:
+            container_height (int): Total height for stacking layers
+            min_layer_height (int): Minimum layer thickness
+            max_layer_height (int): Maximum layer thickness
+            num_attempts (int): Attempts per layer
+            shuffle (bool): Shuffle pasangan (item, position) jika True
+
+        Returns:
+            tuple: (items, positions)
+        """
+        if container_height <= 0:
+            return [], []
+
+        min_layer_height = max(1, int(min_layer_height))
+        max_layer_height = max(min_layer_height, int(max_layer_height))
+
+        layers = []
+        remaining = int(container_height)
+        while remaining > 0:
+            if remaining <= max_layer_height:
+                layers.append(remaining)
+                remaining = 0
+                break
+
+            max_allowed = min(max_layer_height, remaining - min_layer_height)
+            if max_allowed < min_layer_height:
+                layers[-1] += remaining
+                remaining = 0
+                break
+
+            layer_h = self.rng.randint(min_layer_height, max_allowed + 1)
+            layers.append(layer_h)
+            remaining -= layer_h
+
+        items = []
+        positions = []
+        z_offset = 0
+        for layer_h in layers:
+            layer_items, layer_positions = self._generate_single_attempt(
+                return_positions=True,
+                fixed_height=layer_h,
+                z_offset=z_offset,
+            )
+            items.extend(layer_items)
+            positions.extend(layer_positions)
+            z_offset += layer_h
+
+        if shuffle:
+            return self._maybe_shuffle(items, positions, True)
+
+        return items, positions
+
+    def _generate_single_attempt(self, return_positions=False, fixed_height=None, z_offset=0):
         """
         Generate single attempt untuk perfect packing.
 
@@ -86,6 +188,7 @@ class PerfectPackGenerator:
             list: Item set dengan 3D dimensions (length, width, height)
         """
         items = []
+        positions = []
         area = 0
         
         # Initialize bin dengan semua zero heights (empty bin)
@@ -112,7 +215,10 @@ class PerfectPackGenerator:
                 ho = self._sample_dimension(ph, self.H)
                 
                 # Sample height randomly (3D dimension)
-                item_h = self.rng.randint(self.min_height, self.max_height + 1)
+                if fixed_height is not None:
+                    item_h = int(fixed_height)
+                else:
+                    item_h = self.rng.randint(self.min_height, self.max_height + 1)
                 
                 # Constraint: dimensi harus fit dalam container
                 if (wo + ho <= self.W + self.H - maxw - maxh) and \
@@ -132,6 +238,8 @@ class PerfectPackGenerator:
                         # Place item di position terbaik
                         bin_map[best_x:best_x+wo, best_y:best_y+ho] = 1
                         items.append((wo, ho, item_h))  # 3D item
+                        if return_positions:
+                            positions.append((best_x, best_y, int(z_offset)))
                         area += wo * ho
                         maxw = max(maxw, wo)
                         maxh = max(maxh, ho)
@@ -146,12 +254,17 @@ class PerfectPackGenerator:
         if area == self.container_volume - 1:
             # Ada gap 1 pixel, tambah item (1, 1, h) untuk fill
             # Cek apakah ada tempat untuk item (1, 1)
-            item_h = self.rng.randint(self.min_height, self.max_height + 1)
+            if fixed_height is not None:
+                item_h = int(fixed_height)
+            else:
+                item_h = self.rng.randint(self.min_height, self.max_height + 1)
             for x in range(self.W):
                 for y in range(self.H):
                     if bin_map[x, y] == 0:
                         bin_map[x, y] = 1
                         items.append((1, 1, item_h))
+                        if return_positions:
+                            positions.append((x, y, int(z_offset)))
                         area += 1
                         break
                 if area == self.container_volume:
@@ -161,8 +274,22 @@ class PerfectPackGenerator:
         if len(items) > 0:
             shuffle_indices = self.rng.permutation(len(items))
             items = [items[i] for i in shuffle_indices]
-        
+            if return_positions:
+                positions = [positions[i] for i in shuffle_indices]
+
+        if return_positions:
+            return items, positions
+
         return items
+
+    def _maybe_shuffle(self, items, positions, shuffle):
+        if not shuffle or len(items) == 0:
+            return items, positions
+
+        shuffle_indices = self.rng.permutation(len(items))
+        items = [items[i] for i in shuffle_indices]
+        positions = [positions[i] for i in shuffle_indices]
+        return items, positions
 
     def _gaussian_prob_distribution(self, dmax):
         """
@@ -176,8 +303,12 @@ class PerfectPackGenerator:
         """
         # Gaussian centered di dmax/2 dengan std = sigma
         x = np.arange(1, dmax + 1)
-        mu = dmax / 2.0
+        mu = max(1.0, min(float(dmax), float(dmax) * self.mean_ratio))
         prob_continuous = norm.pdf(x, loc=mu, scale=self.sigma)
+        if self.size_bias != 0:
+            # Bias small sizes if size_bias > 0; large sizes if size_bias < 0.
+            bias = ((dmax - x + 1) / dmax) ** self.size_bias
+            prob_continuous = prob_continuous * bias
         
         # Normalize ke probability distribution
         prob = prob_continuous / np.sum(prob_continuous)

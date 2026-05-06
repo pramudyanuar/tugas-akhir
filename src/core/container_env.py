@@ -11,6 +11,7 @@ from .action_mask import ActionMask
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.data.random_generator import RandomGenerator
 from src.data.cutting_stock import CuttingStockGenerator
+from src.data.perfect_pack_generator import PerfectPackGenerator
 from src.planning.repack_trial import RepackTrial
 
 
@@ -44,8 +45,19 @@ class ContainerEnv:
         self.height_map = HeightMap(self.L, self.W, self.H)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
         self.feasibility_map = np.ones((self.L, self.W), dtype=bool)
+        self.debug_mask_stats = False
         if dataset_type == 'cutting_stock':
-            self.dataset_generator = CuttingStockGenerator(seed=seed)
+            self.dataset_generator = CuttingStockGenerator(
+                seed=seed,
+                container_dims=(self.L, self.W, self.H),
+                target_utilization=1.0,
+            )
+        elif dataset_type == 'perfect_pack':
+            self.dataset_generator = PerfectPackGenerator(
+                bin_width=self.L,
+                bin_height=self.W,
+                seed=seed,
+            )
         else:
             self.dataset_generator = RandomGenerator(seed=seed)
         
@@ -150,6 +162,31 @@ class ContainerEnv:
             use_structural_validation=self.use_structural_validation,
             cog_tolerance=self.cog_tolerance,
         )
+
+        if self.debug_mask_stats:
+            num_valid = masking_result.get('num_valid', 0)
+            can_skip = masking_result.get('can_skip', False)
+            mask_bound = masking_result.get('mask_bound')
+            mask_overflow = masking_result.get('mask_overflow')
+            mask_unstable = masking_result.get('mask_unstable')
+            if mask_bound is not None and mask_overflow is not None and mask_unstable is not None:
+                total_cells = mask_bound.size
+                bound_valid = int(np.sum(mask_bound))
+                overflow_valid = int(np.sum(mask_bound & mask_overflow))
+                unstable_valid = int(np.sum(mask_bound & mask_overflow & mask_unstable))
+                removed_bound = total_cells - bound_valid
+                removed_overflow = bound_valid - overflow_valid
+                removed_unstable = overflow_valid - unstable_valid
+                print(
+                    f"Mask breakdown | total={total_cells} "
+                    f"removed_bound={removed_bound} "
+                    f"removed_overflow={removed_overflow} "
+                    f"removed_unstable={removed_unstable}"
+                )
+            print(
+                f"Mask debug | item={self.current_index} dims=({item_l},{item_w},{item_h}) "
+                f"valid={num_valid} can_skip={can_skip}"
+            )
         
         return state, action_mask
     

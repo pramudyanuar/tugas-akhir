@@ -88,7 +88,7 @@ class TrainingLoop:
     """
     
     def __init__(self, env, ppo_agent, n_steps=2048, 
-                 device='cpu', seed=None):
+                 device='cpu', seed=None, debug_actions=False):
         """
         Initialize training loop.
         
@@ -104,6 +104,7 @@ class TrainingLoop:
         self.n_steps = n_steps
         self.device = device
         self.seed = seed
+        self.debug_actions = bool(debug_actions)
 
         # Hierarchical components for macro decision + candidate selection.
         self.high_level_agent = HighLevelAgent(input_dim=env.state_size).to(device)
@@ -475,6 +476,17 @@ class TrainingLoop:
                 state, action_mask, sample_strategy=True
             )
             
+            if self.debug_actions:
+                valid_count = int(np.sum(effective_mask[:-1] > 0))
+                action_valid = (
+                    0 <= action < len(effective_mask)
+                    and effective_mask[action] > 0
+                )
+                print(
+                    f"Action debug | step={self.total_steps} action={action} "
+                    f"valid_count={valid_count} action_valid={action_valid}"
+                )
+
             # Take step in environment
             (next_state, next_mask), reward, done, info = self.env.step(
                 (action, strategy_info.get('orientation', 0))
@@ -601,7 +613,7 @@ class TrainingLoop:
         print(f"{'='*70}\n")
 
 
-def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', dataset_type='random'):
+def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', dataset_type='random', debug_mask=False, debug_actions=False):
     """
     Main training function.
     
@@ -628,6 +640,7 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
         container_width=24,     # 8 feet ≈ 2.4 meters
         container_height=26     # 8.5 feet ≈ 2.6 meters
     )
+    env.debug_mask_stats = bool(debug_mask)
     state, action_mask = env.reset()
     
     state_size = env.state_size
@@ -662,7 +675,8 @@ def train(num_epochs=10, n_steps=2048, max_items=20, seed=42, device='cpu', data
         ppo_agent=ppo,
         n_steps=n_steps,
         device=device,
-        seed=seed
+        seed=seed,
+        debug_actions=debug_actions
     )
     
     # Training loop
@@ -740,6 +754,8 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
     parser.add_argument('--dataset', type=str, default='random', help='Dataset: random or cutting_stock')
+    parser.add_argument('--debug-mask', action='store_true', help='Print action mask stats per step')
+    parser.add_argument('--debug-actions', action='store_true', help='Print chosen action stats per step')
     
     args = parser.parse_args()
     
@@ -755,7 +771,9 @@ if __name__ == "__main__":
         max_items=args.max_items,
         seed=args.seed,
         device=args.device,
-        dataset_type=args.dataset
+        dataset_type=args.dataset,
+        debug_mask=args.debug_mask,
+        debug_actions=args.debug_actions
     )
     
     print("\nTraining completed successfully!")

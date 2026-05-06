@@ -124,14 +124,16 @@ class ActionMask:
                         if not valid:
                             mask[x, y] = False
                             continue
-
-                    is_item_stable = is_stable(
-                        height_map.map,
-                        x, y, item_length, item_width, item_height,
-                        self.H
-                    )
-                    if not is_item_stable:
-                        mask[x, y] = False
+                    else:
+                        # Non-structural validation: use relaxed stability check
+                        is_item_stable = is_stable(
+                            height_map.map,
+                            x, y, item_length, item_width, item_height,
+                            self.H,
+                            strict_mode=False,
+                        )
+                        if not is_item_stable:
+                            mask[x, y] = False
                 except Exception:
                     # Jika ada error di LBCP check, mask posisi ini
                     mask[x, y] = False
