@@ -26,7 +26,7 @@ class ContainerEnv:
                  use_structural_validation=True, cog_tolerance=0.15,
                  layered_min_height=2, layered_max_height=6,
                  perfect_pack_sigma=4, perfect_pack_size_bias=3.0,
-                 perfect_pack_mean_ratio=0.25):
+                 perfect_pack_mean_ratio=0.25, fast_stability_mask=False):
         """
         Initialize container environment.
         
@@ -46,6 +46,7 @@ class ContainerEnv:
         self.dataset_type = dataset_type
         self.use_structural_validation = use_structural_validation
         self.cog_tolerance = cog_tolerance
+        self.fast_stability_mask = bool(fast_stability_mask)
         self.layered_min_height = max(1, int(layered_min_height))
         self.layered_max_height = max(self.layered_min_height, int(layered_max_height))
         self.perfect_pack_sigma = perfect_pack_sigma
@@ -197,6 +198,7 @@ class ContainerEnv:
             feasibility_map=self.feasibility_map,
             use_structural_validation=self.use_structural_validation,
             cog_tolerance=self.cog_tolerance,
+            fast_stability_mask=self.fast_stability_mask,
         )
         action_mask = self.action_mask_calculator.get_action_vector(
             item_l,
@@ -209,6 +211,7 @@ class ContainerEnv:
             feasibility_map=self.feasibility_map,
             use_structural_validation=self.use_structural_validation,
             cog_tolerance=self.cog_tolerance,
+            fast_stability_mask=self.fast_stability_mask,
         )
 
         if self.debug_mask_stats:

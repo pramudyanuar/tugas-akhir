@@ -91,7 +91,7 @@ class ActionMask:
     
     def mask_unstable_lbcp(self, item_length, item_width, item_height, height_map,
                            feasibility_map=None, use_structural_validation=False,
-                           cog_tolerance=0.15):
+                           cog_tolerance=0.15, fast_stability_mask=False):
         """
         Mask unstable (LBCP): posisi yang akan unstable berdasarkan LBCP validation.
         
@@ -120,17 +120,23 @@ class ActionMask:
                 # Cek LBCP stability
                 try:
                     if use_structural_validation and feasibility_map is not None:
-                        obj_payload = {'x': x, 'y': y, 'w': item_length, 'd': item_width}
-                        valid, _, _ = validate_structural_stability(
-                            obj_payload,
-                            None,
-                            hm,
-                            feasibility_map,
-                            cog_tolerance,
-                        )
-                        if not valid:
-                            mask[x, y] = False
-                            continue
+                        if fast_stability_mask:
+                            region_fm = feasibility_map[x:x + item_length, y:y + item_width]
+                            if not np.any(region_fm):
+                                mask[x, y] = False
+                                continue
+                        else:
+                            obj_payload = {'x': x, 'y': y, 'w': item_length, 'd': item_width}
+                            valid, _, _ = validate_structural_stability(
+                                obj_payload,
+                                None,
+                                hm,
+                                feasibility_map,
+                                cog_tolerance,
+                            )
+                            if not valid:
+                                mask[x, y] = False
+                                continue
                     else:
                         # Non-structural validation: use relaxed stability check
                         is_item_stable = is_stable(
@@ -151,7 +157,7 @@ class ActionMask:
                       height_map, has_valid_position=True,
                       top_item_map=None, placed_items=None, item_stacking=None,
                       feasibility_map=None, use_structural_validation=False,
-                      cog_tolerance=0.15):
+                      cog_tolerance=0.15, fast_stability_mask=False):
         """
         Combine semua masks dengan logic:
         1. out-of-bound AND
@@ -184,6 +190,7 @@ class ActionMask:
             feasibility_map=feasibility_map,
             use_structural_validation=use_structural_validation,
             cog_tolerance=cog_tolerance,
+            fast_stability_mask=fast_stability_mask,
         )
         mask_stacking = self.mask_stacking_policy(
             item_length,
@@ -220,7 +227,7 @@ class ActionMask:
                           height_map, include_skip=True,
                           top_item_map=None, placed_items=None, item_stacking=None,
                           feasibility_map=None, use_structural_validation=False,
-                          cog_tolerance=0.15):
+                          cog_tolerance=0.15, fast_stability_mask=False):
         """
         Get action vector untuk disimpalin ke neural network.
         
@@ -247,6 +254,7 @@ class ActionMask:
             feasibility_map=feasibility_map,
             use_structural_validation=use_structural_validation,
             cog_tolerance=cog_tolerance,
+            fast_stability_mask=fast_stability_mask,
         )
         
         combined_mask = masking_result['combined_mask']
