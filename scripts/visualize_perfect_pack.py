@@ -10,12 +10,14 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.data.perfect_pack_generator import PerfectPackGenerator
+from src.utils.item_utils import get_item_dims
 from scripts.visualization import ContainerVisualizer
 
 
 def build_height_map(length, width, items, positions):
     height_map = np.zeros((length, width), dtype=np.int32)
-    for (l, w, h), (x, y, z) in zip(items, positions):
+    for item, (x, y, z) in zip(items, positions):
+        l, w, h = get_item_dims(item)
         top = z + h
         current = height_map[x:x + l, y:y + w]
         height_map[x:x + l, y:y + w] = np.maximum(current, top)
@@ -62,7 +64,7 @@ def main():
             num_attempts=3,
             shuffle=args.shuffle,
         )
-        container_height = max(item[2] for item in items)
+        container_height = max(get_item_dims(item)[2] for item in items)
 
     if len(items) == 0:
         raise RuntimeError('Perfect pack generation failed to produce items')

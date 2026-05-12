@@ -8,6 +8,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 from src.core.container_env import ContainerEnv
+from src.utils.item_utils import get_item_dims
 
 
 class ContainerVisualizer:
@@ -67,7 +68,7 @@ class ContainerVisualizer:
         
         # Draw items
         for i, (item, pos) in enumerate(zip(placed_items, placed_positions)):
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             x, y, z = pos
             
             # Draw rectangle
@@ -120,7 +121,7 @@ class ContainerVisualizer:
         
         # Draw items
         for i, (item, pos) in enumerate(zip(placed_items, placed_positions)):
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             x, y, z = pos
             
             # Define vertices of box

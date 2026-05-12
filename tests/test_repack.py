@@ -19,10 +19,19 @@ class TestRepackTrial:
         """Test environment state for repacking."""
         height_map = HeightMap(59, 23, 23)
         return {
-            'items': [(10, 10, 10), (8, 8, 8), (6, 6, 6), (5, 5, 5)],
+            'items': [
+                {'l': 10, 'w': 10, 'h': 10, 'stacking': 'stackable'},
+                {'l': 8, 'w': 8, 'h': 8, 'stacking': 'stackable'},
+                {'l': 6, 'w': 6, 'h': 6, 'stacking': 'stackable'},
+                {'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'},
+            ],
             'current_index': 4,
             'height_map': height_map,
-            'placed_items': [(10, 10, 10), (8, 8, 8), (6, 6, 6)],
+            'placed_items': [
+                {'l': 10, 'w': 10, 'h': 10, 'stacking': 'stackable'},
+                {'l': 8, 'w': 8, 'h': 8, 'stacking': 'stackable'},
+                {'l': 6, 'w': 6, 'h': 6, 'stacking': 'stackable'},
+            ],
             'placed_positions': [(0, 0, 0), (10, 0, 0), (20, 0, 0)]
         }
 
@@ -57,7 +66,7 @@ class TestRepackTrial:
     def test_repack_trial_with_empty_state(self, repack_trial):
         """Test RepackTrial with empty placed items."""
         env_state = {
-            'items': [(10, 10, 10)],
+            'items': [{'l': 10, 'w': 10, 'h': 10, 'stacking': 'stackable'}],
             'current_index': 0,
             'height_map': HeightMap(59, 23, 23),
             'placed_items': [],
@@ -104,7 +113,7 @@ class TestRepackTrial:
 
     def test_repack_single_item(self, repacker):
         """Test repacking with single item."""
-        items = [(5, 5, 5)]
+        items = [{'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'}]
         positions = [(0, 0, 0)]
         
         success, new_positions, metric = repacker.attempt_repack_bottom_left_fill(items, positions)

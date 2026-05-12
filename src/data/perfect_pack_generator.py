@@ -13,6 +13,8 @@ Main Features:
 import numpy as np
 from scipy.stats import norm
 
+from src.utils.item_utils import get_item_dims, make_item
+
 
 class PerfectPackGenerator:
     """
@@ -49,6 +51,8 @@ class PerfectPackGenerator:
         self.mean_ratio = float(mean_ratio)
         self.container_volume = self.W * self.H
         self.rng = np.random.RandomState(seed)
+        stack_seed = None if seed is None else int(seed) + 137
+        self.stack_rng = np.random.RandomState(stack_seed)
         
         # For 3D items (to match randomgenerator and container_env)
         self.min_height = 2
@@ -63,14 +67,15 @@ class PerfectPackGenerator:
                               Jika tidak berhasil dalam attempts, return best result
 
         Returns:
-            list: List of tuples (width, height) dengan 100% bin utilization (atau ~100%)
+            list: List of item dicts dengan 100% bin utilization (atau ~100%)
         """
         best_items = None
         best_util = 0.0
 
-        for attempt in range(num_attempts):
+        max_attempts = max(10, int(num_attempts))
+        for attempt in range(max_attempts):
             items = self._generate_single_attempt()
-            area = sum(item[0] * item[1] for item in items)
+            area = sum(get_item_dims(item)[0] * get_item_dims(item)[1] for item in items)
             util = area / self.container_volume
 
             if util >= 0.99:  # ~100% utilization achieved
@@ -80,7 +85,18 @@ class PerfectPackGenerator:
                 best_util = util
                 best_items = items
 
-        return best_items if best_items else []
+        if not best_items:
+            return []
+
+        best_area = sum(get_item_dims(item)[0] * get_item_dims(item)[1] for item in best_items)
+        target_area = int(np.ceil(self.container_volume * 0.95))
+        if best_area < target_area:
+            gap = target_area - best_area
+            for _ in range(gap):
+                item_h = self.rng.randint(self.min_height, self.max_height + 1)
+                best_items.append(make_item(1, 1, item_h, self._sample_stacking()))
+
+        return best_items
 
     def generate_perfect_pack_with_positions(self, num_attempts=3, shuffle=False):
         """
@@ -99,9 +115,10 @@ class PerfectPackGenerator:
         best_positions = None
         best_util = 0.0
 
-        for _ in range(num_attempts):
+        max_attempts = max(10, int(num_attempts))
+        for _ in range(max_attempts):
             items, positions = self._generate_single_attempt(return_positions=True)
-            area = sum(item[0] * item[1] for item in items)
+            area = sum(get_item_dims(item)[0] * get_item_dims(item)[1] for item in items)
             util = area / self.container_volume
 
             if util >= 0.99:
@@ -237,7 +254,7 @@ class PerfectPackGenerator:
                         
                         # Place item di position terbaik
                         bin_map[best_x:best_x+wo, best_y:best_y+ho] = 1
-                        items.append((wo, ho, item_h))  # 3D item
+                        items.append(make_item(wo, ho, item_h, self._sample_stacking()))
                         if return_positions:
                             positions.append((best_x, best_y, int(z_offset)))
                         area += wo * ho
@@ -262,7 +279,7 @@ class PerfectPackGenerator:
                 for y in range(self.H):
                     if bin_map[x, y] == 0:
                         bin_map[x, y] = 1
-                        items.append((1, 1, item_h))
+                        items.append(make_item(1, 1, item_h, self._sample_stacking()))
                         if return_positions:
                             positions.append((x, y, int(z_offset)))
                         area += 1
@@ -443,9 +460,12 @@ class PerfectPackGenerator:
             items = self.generate_perfect_pack(num_attempts=3)
             # Pad if necessary
             while len(items) < num_items:
-                small_item = (self.rng.randint(3, 6), 
-                             self.rng.randint(3, 6), 
-                             self.rng.randint(self.min_height, self.max_height + 1))
+                small_item = make_item(
+                    self.rng.randint(3, 6),
+                    self.rng.randint(3, 6),
+                    self.rng.randint(self.min_height, self.max_height + 1),
+                    self._sample_stacking(),
+                )
                 items.append(small_item)
             return items[:num_items]
         
@@ -469,13 +489,13 @@ class PerfectPackGenerator:
                     # Constraint: item area tidak lebih dari remaining space
                     if w * h <= remaining_area + 10:  # Allow small overage
                         d = self.rng.randint(self.min_height, self.max_height + 1)
-                        items.append((w, h, d))
+                        items.append(make_item(w, h, d, self._sample_stacking()))
                         current_area += w * h
                         break
                 else:
                     # If can't find good size, add small item
                     d = self.rng.randint(self.min_height, self.max_height + 1)
-                    items.append((3, 3, d))
+                    items.append(make_item(3, 3, d, self._sample_stacking()))
                     current_area += 9
             
             return items[:num_items]
@@ -497,7 +517,7 @@ class PerfectPackGenerator:
                 h = self.rng.randint(2, min(max_h, 10))
                 d = self.rng.randint(self.min_height, self.max_height + 1)
                 
-                items.append((w, h, d))
+                items.append(make_item(w, h, d, self._sample_stacking()))
                 current_area += w * h
                 
                 # Stop if we've reached target area
@@ -509,10 +529,18 @@ class PerfectPackGenerator:
                 w = self.rng.randint(2, 4)
                 h = self.rng.randint(2, 4)
                 d = self.rng.randint(self.min_height, self.max_height + 1)
-                items.append((w, h, d))
+                items.append(make_item(w, h, d, self._sample_stacking()))
                 current_area += w * h
             
             return items[:num_items]
+
+    def _sample_stacking(self):
+        u = self.stack_rng.rand()
+        if u < 0.60:
+            return 'stackable'
+        if u < 0.85:
+            return 'fragile'
+        return 'no_stack'
 
 
 # Convenience function untuk API compatibility

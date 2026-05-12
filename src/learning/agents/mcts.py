@@ -1,5 +1,6 @@
 import numpy as np
 from src.common.mcts_node import MCTSNode
+from src.utils.item_utils import get_item_dims, get_item_stacking, make_item
 
 
 class MCTS:
@@ -305,6 +306,7 @@ class MCTS:
             'height_map': self.env.height_map.map.copy(),
             'placed_items': list(self.env.placed_items),
             'placed_positions': list(self.env.placed_positions),
+            'top_item_map': self.env.top_item_map.copy() if hasattr(self.env, 'top_item_map') else None,
             'current_index': int(self.env.current_index),
             'episode_reward': float(self.env.episode_reward),
             'episode_length': int(self.env.episode_length),
@@ -317,6 +319,8 @@ class MCTS:
         self.env.height_map.map = snapshot['height_map'].copy()
         self.env.placed_items = list(snapshot['placed_items'])
         self.env.placed_positions = list(snapshot['placed_positions'])
+        if snapshot.get('top_item_map') is not None and hasattr(self.env, 'top_item_map'):
+            self.env.top_item_map = snapshot['top_item_map'].copy()
         self.env.current_index = int(snapshot['current_index'])
         self.env.episode_reward = float(snapshot.get('episode_reward', self.env.episode_reward))
         self.env.episode_length = int(snapshot.get('episode_length', self.env.episode_length))
@@ -342,7 +346,7 @@ class MCTS:
         ranked = []
         for idx, (pos, item) in enumerate(zip(snapshot['placed_positions'], snapshot['placed_items'])):
             x, y, z = pos
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             ranked.append((z + h, idx))
         ranked.sort(reverse=True)
         return [idx for _, idx in ranked]
@@ -363,13 +367,17 @@ class MCTS:
                 remaining_positions.append(pos)
 
         new_height_map = np.zeros_like(snapshot['height_map'])
-        for (x, y, z), (l, w, h) in zip(remaining_positions, remaining_items):
-            new_height_map[x:x+l, y:y+w] = z + h
+        top_item_map = np.full(new_height_map.shape, -1, dtype=np.int32)
+        for idx, ((x, y, z), item) in enumerate(zip(remaining_positions, remaining_items)):
+            item_l, item_w, item_h = get_item_dims(item)
+            new_height_map[x:x + item_l, y:y + item_w] = z + item_h
+            top_item_map[x:x + item_l, y:y + item_w] = idx
 
         return {
             'height_map': new_height_map,
             'placed_items': remaining_items,
             'placed_positions': remaining_positions,
+            'top_item_map': top_item_map,
             'current_index': snapshot['current_index'],
             'episode_reward': snapshot.get('episode_reward', 0.0),
             'episode_length': snapshot.get('episode_length', 0),
@@ -391,11 +399,20 @@ class MCTS:
                 return 0.0, self._capture_env_snapshot(), False
 
             # Pack larger items first for better fit chance.
-            candidate_items.sort(key=lambda it: it[0] * it[1] * it[2], reverse=True)
+            candidate_items.sort(
+                key=lambda it: get_item_dims(it)[0] * get_item_dims(it)[1] * get_item_dims(it)[2],
+                reverse=True,
+            )
 
             placed_now = 0
-            for item_l, item_w, item_h in candidate_items:
-                action = self._find_first_valid_action(item_l, item_w, item_h)
+            for item in candidate_items:
+                item_l, item_w, item_h = get_item_dims(item)
+                action = self._find_first_valid_action(
+                    item_l,
+                    item_w,
+                    item_h,
+                    item_stacking=get_item_stacking(item),
+                )
                 if action is None:
                     continue
 
@@ -404,8 +421,12 @@ class MCTS:
                 base_height = self.env.height_map.max_height_in_region(x, y, item_l, item_w)
                 new_height = base_height + item_h
                 self.env.height_map.update_region(x, y, item_l, item_w, new_height)
-                self.env.placed_items.append((item_l, item_w, item_h))
+                stacking = get_item_stacking(item)
+                self.env.placed_items.append(make_item(item_l, item_w, item_h, stacking))
                 self.env.placed_positions.append((x, y, base_height))
+                if hasattr(self.env, 'top_item_map'):
+                    placed_index = len(self.env.placed_items) - 1
+                    self.env.top_item_map[x:x + item_l, y:y + item_w] = placed_index
                 placed_now += 1
 
             success_rate = placed_now / max(len(candidate_items), 1)
@@ -420,10 +441,10 @@ class MCTS:
         finally:
             self._apply_env_snapshot(original)
 
-    def _find_first_valid_action(self, item_l, item_w, item_h):
+    def _find_first_valid_action(self, item_l, item_w, item_h, item_stacking=None):
         """Find first legal placement action for an item on current env snapshot."""
         for y in range(self.env.W):
             for x in range(self.env.L):
-                if self.env._is_valid_position(x, y, item_l, item_w, item_h):
+                if self.env._is_valid_position(x, y, item_l, item_w, item_h, item_stacking):
                     return y * self.env.L + x
         return None

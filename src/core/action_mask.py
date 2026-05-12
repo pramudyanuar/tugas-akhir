@@ -2,6 +2,8 @@ import numpy as np
 import sys
 import os
 
+from src.utils.item_utils import get_item_stacking
+
 # Use relative imports for clean module structure
 from .height_map import HeightMap
 from .lbcp import is_stable, validate_structural_stability
@@ -72,12 +74,16 @@ class ActionMask:
         mask = np.ones((self.L, self.W), dtype=bool)
         
         # Mask posisi dimana base_height (max di footprint) + item_height > max_height
+        hm = height_map.map if hasattr(height_map, 'map') else height_map
         for x in range(self.L):
             for y in range(self.W):
                 if x + item_length > self.L or y + item_width > self.W:
                     mask[x, y] = False
                     continue
-                base_height = height_map.max_height_in_region(x, y, item_length, item_width)
+                if hasattr(height_map, 'max_height_in_region'):
+                    base_height = height_map.max_height_in_region(x, y, item_length, item_width)
+                else:
+                    base_height = np.max(hm[x:x + item_length, y:y + item_width])
                 if base_height + item_height > self.H:
                     mask[x, y] = False
         
@@ -103,6 +109,7 @@ class ActionMask:
         mask = np.ones((self.L, self.W), dtype=bool)
         
         # Check stabilitas di setiap posisi
+        hm = height_map.map if hasattr(height_map, 'map') else height_map
         for x in range(self.L):
             for y in range(self.W):
                 # Cek boundary dulu
@@ -117,7 +124,7 @@ class ActionMask:
                         valid, _, _ = validate_structural_stability(
                             obj_payload,
                             None,
-                            height_map.map,
+                            hm,
                             feasibility_map,
                             cog_tolerance,
                         )
@@ -127,7 +134,7 @@ class ActionMask:
                     else:
                         # Non-structural validation: use relaxed stability check
                         is_item_stable = is_stable(
-                            height_map.map,
+                            hm,
                             x, y, item_length, item_width, item_height,
                             self.H,
                             strict_mode=False,
@@ -142,6 +149,7 @@ class ActionMask:
     
     def combine_masks(self, item_length, item_width, item_height,
                       height_map, has_valid_position=True,
+                      top_item_map=None, placed_items=None, item_stacking=None,
                       feasibility_map=None, use_structural_validation=False,
                       cog_tolerance=0.15):
         """
@@ -177,9 +185,17 @@ class ActionMask:
             use_structural_validation=use_structural_validation,
             cog_tolerance=cog_tolerance,
         )
+        mask_stacking = self.mask_stacking_policy(
+            item_length,
+            item_width,
+            height_map,
+            top_item_map=top_item_map,
+            placed_items=placed_items,
+            item_stacking=item_stacking,
+        )
         
         # Combined mask: intersection dari semua mask (AND logic)
-        combined_mask = mask_bound & mask_overflow & mask_unstable
+        combined_mask = mask_bound & mask_overflow & mask_unstable & mask_stacking
         
         # Get valid positions
         valid_positions = np.where(combined_mask)
@@ -196,11 +212,13 @@ class ActionMask:
             'num_valid': num_valid,
             'mask_bound': mask_bound,
             'mask_overflow': mask_overflow,
-            'mask_unstable': mask_unstable
+            'mask_unstable': mask_unstable,
+            'mask_stacking': mask_stacking
         }
     
     def get_action_vector(self, item_length, item_width, item_height,
                           height_map, include_skip=True,
+                          top_item_map=None, placed_items=None, item_stacking=None,
                           feasibility_map=None, use_structural_validation=False,
                           cog_tolerance=0.15):
         """
@@ -223,6 +241,9 @@ class ActionMask:
             item_width,
             item_height,
             height_map,
+            top_item_map=top_item_map,
+            placed_items=placed_items,
+            item_stacking=item_stacking,
             feasibility_map=feasibility_map,
             use_structural_validation=use_structural_validation,
             cog_tolerance=cog_tolerance,
@@ -240,3 +261,48 @@ class ActionMask:
             action_mask = np.concatenate([action_mask, skip_mask])
         
         return action_mask.astype(np.float32)
+
+    def mask_stacking_policy(self, item_length, item_width, height_map,
+                             top_item_map=None, placed_items=None, item_stacking=None):
+        """Mask positions that violate stacking policy based on top items."""
+        mask = np.ones((self.L, self.W), dtype=bool)
+
+        if top_item_map is None or placed_items is None:
+            return mask
+
+        if item_stacking is None:
+            item_stacking = 'stackable'
+
+        hm = height_map.map if hasattr(height_map, 'map') else height_map
+
+        for x in range(self.L):
+            for y in range(self.W):
+                if x + item_length > self.L or y + item_width > self.W:
+                    mask[x, y] = False
+                    continue
+
+                base_height = np.max(hm[x:x + item_length, y:y + item_width])
+                if base_height <= 0:
+                    continue
+
+                region = hm[x:x + item_length, y:y + item_width]
+                support_mask = region == base_height
+                if not np.any(support_mask):
+                    continue
+
+                support_indices = set(
+                    top_item_map[x:x + item_length, y:y + item_width][support_mask].tolist()
+                )
+                for idx in support_indices:
+                    if idx < 0 or idx >= len(placed_items):
+                        continue
+                    support_item = placed_items[idx]
+                    support_stack = get_item_stacking(support_item)
+                    if support_stack == 'no_stack':
+                        mask[x, y] = False
+                        break
+                    if support_stack == 'fragile' and item_stacking != 'fragile':
+                        mask[x, y] = False
+                        break
+
+        return mask

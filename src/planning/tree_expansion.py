@@ -14,6 +14,7 @@ import numpy as np
 import copy
 
 from src.core.lbcp import validate_structural_stability, update_feasibility_map
+from src.utils.item_utils import get_item_dims, get_item_stacking, make_item
 
 
 class TreeExpander:
@@ -122,7 +123,8 @@ class TreeExpander:
             return sequences, solved
 
         current_item = current_items[current_index]
-        l, w, h = current_item
+        l, w, h = get_item_dims(current_item)
+        item_stacking = get_item_stacking(current_item)
 
         # Line 2-7: Generate candidate actions (object + orientation)
         # ϕ = rotation angle {0, π/2} = {0, 1} (no rotation, 90 degree rotation)
@@ -138,6 +140,7 @@ class TreeExpander:
                 item_l,
                 item_w,
                 h,
+                item_stacking=item_stacking,
                 max_candidates=self.max_candidates_per_orientation,
             )
 
@@ -262,7 +265,8 @@ class TreeExpander:
 
         return best_pos
 
-    def _generate_candidate_actions(self, state, item_l, item_w, item_h, max_candidates=8):
+    def _generate_candidate_actions(self, state, item_l, item_w, item_h,
+                                    item_stacking=None, max_candidates=8):
         """
         Generate candidate actions with reward scores using action masks.
 
@@ -285,6 +289,9 @@ class TreeExpander:
                 item_w,
                 item_h,
                 height_map_obj,
+                top_item_map=state.get('top_item_map'),
+                placed_items=state.get('placed_items'),
+                item_stacking=item_stacking,
                 feasibility_map=state.get('feasibility_map', None),
                 use_structural_validation=getattr(self.env, 'use_structural_validation', False),
                 cog_tolerance=getattr(self.env, 'cog_tolerance', 0.15),
@@ -396,13 +403,16 @@ class TreeExpander:
             x, y, z = action
             items = parent_state.get('items', [])
             if item_idx < len(items):
-                l, w, h = items[item_idx]
+                item = items[item_idx]
+                l, w, h = get_item_dims(item)
+                stacking = get_item_stacking(item)
 
                 # Rotate jika phi = 1
                 if phi == 1:
                     l, w = w, l
 
-                self._update_state_after_placement(child_state, (x, y, z), (l, w, h))
+                placed_item = make_item(l, w, h, stacking)
+                self._update_state_after_placement(child_state, (x, y, z), placed_item)
         
         return child_state
 
@@ -436,17 +446,17 @@ class TreeExpander:
             return None
         return state.get('height_map')
 
-    def _update_state_after_placement(self, state, action, item_dims):
+    def _update_state_after_placement(self, state, action, placed_item):
         """
         Update height map, feasibility map, and placement tracking in state.
 
         Args:
             state (dict): State to update
             action (tuple): (x, y, z)
-            item_dims (tuple): (l, w, h)
+            placed_item (dict): Item with dims and stacking
         """
         x, y, z = action
-        l, w, h = item_dims
+        l, w, h = get_item_dims(placed_item)
 
         # Update height map
         height_map = state.get('height_map')
@@ -490,8 +500,15 @@ class TreeExpander:
             placed_positions = []
             state['placed_positions'] = placed_positions
 
-        placed_items.append(item_dims)
+        placed_items.append(placed_item)
         placed_positions.append((x, y, z))
+
+        top_item_map = state.get('top_item_map')
+        if top_item_map is None:
+            top_item_map = np.full((self.env.L, self.env.W), -1, dtype=np.int32)
+            state['top_item_map'] = top_item_map
+        placed_index = len(placed_items) - 1
+        top_item_map[x:x + l, y:y + w] = placed_index
 
     def _sort_sequence(self, sequence):
         """

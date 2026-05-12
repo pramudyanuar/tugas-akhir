@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import sys
 import os
 import csv
+import time
 from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for server environments
@@ -20,6 +21,7 @@ from src.planning.mcts import MCTS
 from src.planning.high_level_search import HighLevelSearcher
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
+from src.utils.item_utils import get_item_dims
 
 
 class TrainingLogger:
@@ -471,6 +473,13 @@ class TrainingLoop:
             dict: Collected trajectories
         """
         steps_collected = 0
+        timing = {
+            'action_select_s': 0.0,
+            'env_step_s': 0.0,
+            'store_transition_s': 0.0,
+            'episode_reset_s': 0.0,
+            'visualization_s': 0.0,
+        }
         episode_info = {
             'rewards': [],
             'lengths': [],
@@ -481,15 +490,19 @@ class TrainingLoop:
         strategy_buffer = []  # Store strategy info for HighLevelAgent update
         
         # Reset environment
+        reset_start = time.perf_counter()
         state, action_mask = self.env.reset(seed=self.seed)
+        timing['episode_reset_s'] += time.perf_counter() - reset_start
         if self.seed is not None:
             self.seed += 1  # Increment seed untuk variety
         
         while steps_collected < n_steps:
             # Select action with hierarchical control (sample strategies for training).
+            select_start = time.perf_counter()
             action, log_prob, value, effective_mask, strategy_info, policy_state = self._select_hierarchical_action(
                 state, action_mask, sample_strategy=True
             )
+            timing['action_select_s'] += time.perf_counter() - select_start
             
             if self.debug_actions:
                 valid_count = int(np.sum(effective_mask[:-1] > 0))
@@ -503,11 +516,14 @@ class TrainingLoop:
                 )
 
             # Take step in environment
+            step_start = time.perf_counter()
             (next_state, next_mask), reward, done, info = self.env.step(
                 (action, strategy_info.get('orientation', 0))
             )
+            timing['env_step_s'] += time.perf_counter() - step_start
             
             # Store PPO transition
+            store_start = time.perf_counter()
             self.ppo.store_transition(
                 state=policy_state,
                 action=action,
@@ -517,6 +533,7 @@ class TrainingLoop:
                 action_mask=effective_mask,
                 done=1.0 if done else 0.0
             )
+            timing['store_transition_s'] += time.perf_counter() - store_start
             
             # Store strategy info for HighLevelAgent update
             strategy_buffer.append({
@@ -556,11 +573,15 @@ class TrainingLoop:
                 
                 # Save visualization every vis_interval episodes
                 if self.episode_count % self.vis_interval == 0 and self.episode_count > self.last_vis_episode:
+                    vis_start = time.perf_counter()
                     self._save_visualization(self.episode_count)
+                    timing['visualization_s'] += time.perf_counter() - vis_start
                     self.last_vis_episode = self.episode_count
                 
                 # Reset environment untuk episode baru
+                reset_start = time.perf_counter()
                 state, action_mask = self.env.reset(seed=self.seed)
+                timing['episode_reset_s'] += time.perf_counter() - reset_start
                 if self.seed is not None:
                     self.seed += 1
         
@@ -572,7 +593,7 @@ class TrainingLoop:
         else:
             next_value = 0.0
         
-        return episode_info, next_value, strategy_buffer
+        return episode_info, next_value, strategy_buffer, timing
     
     def train_epoch(self, num_epochs=2, log_frequency=10):
         """
@@ -586,8 +607,10 @@ class TrainingLoop:
         print(f"Training Epoch {self.episode_count // log_frequency + 1}")
         print(f"{'='*70}\n")
         
+        epoch_start = time.perf_counter()
+
         # Collect trajectories
-        episode_info, next_value, strategy_buffer = self.collect_steps(self.n_steps)
+        episode_info, next_value, strategy_buffer, timing = self.collect_steps(self.n_steps)
         
         # Update HighLevelAgent
         print(f"\nUpdating HighLevelAgent... ", end='', flush=True)
@@ -598,6 +621,17 @@ class TrainingLoop:
         print(f"Updating PPO network... ", end='', flush=True)
         self.ppo.update(next_value=next_value, num_epochs=num_epochs, batch_size=32)
         print("Done!\n")
+
+        epoch_elapsed = time.perf_counter() - epoch_start
+        steps_per_sec = self.n_steps / epoch_elapsed if epoch_elapsed > 0 else 0.0
+
+        timing_total = sum(timing.values())
+        if timing_total > 0:
+            def pct(value):
+                return (value / timing_total) * 100.0
+        else:
+            def pct(value):
+                return 0.0
         
         # Print statistics
         stats = self.logger.get_stats()
@@ -625,6 +659,13 @@ class TrainingLoop:
         print(f"MCTS Fallback Used:   {self.rearrange_stats['mcts_fallback_used']}")
         print(f"Total Steps:         {self.total_steps}")
         print(f"Total Episodes:      {self.episode_count}")
+        print(f"Epoch Time:          {epoch_elapsed:.2f}s ({steps_per_sec:.1f} steps/s)")
+        print("Timing Breakdown (collect_steps):")
+        print(f"  Action Select:     {timing['action_select_s']:.2f}s ({pct(timing['action_select_s']):.1f}%)")
+        print(f"  Env Step:          {timing['env_step_s']:.2f}s ({pct(timing['env_step_s']):.1f}%)")
+        print(f"  Store Transition:  {timing['store_transition_s']:.2f}s ({pct(timing['store_transition_s']):.1f}%)")
+        print(f"  Episode Reset:     {timing['episode_reset_s']:.2f}s ({pct(timing['episode_reset_s']):.1f}%)")
+        print(f"  Visualization:     {timing['visualization_s']:.2f}s ({pct(timing['visualization_s']):.1f}%)")
         print(f"{'='*70}\n")
 
 
@@ -675,7 +716,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
 
     # Dataset summary (after initial reset)
     if env.items:
-        dims = np.array(env.items, dtype=np.float32)
+        dims = np.array([get_item_dims(item) for item in env.items], dtype=np.float32)
         volumes = dims[:, 0] * dims[:, 1] * dims[:, 2]
         total_volume = float(np.sum(volumes))
         container_volume = float(env.L * env.W * env.H)
@@ -690,7 +731,8 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
 
         if env.dataset_type == 'perfect_pack_layered' and env.ground_truth_positions:
             layer_map = {}
-            for (l, w, h), (x, y, z) in zip(env.items, env.ground_truth_positions):
+            for item, (x, y, z) in zip(env.items, env.ground_truth_positions):
+                _, _, h = get_item_dims(item)
                 layer_map[z] = max(layer_map.get(z, 0), int(h))
             layer_heights = np.array(list(layer_map.values()), dtype=np.float32)
             if layer_heights.size > 0:

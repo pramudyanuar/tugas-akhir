@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from .tree_expansion import TreeExpander
 from src.core.height_map import HeightMap
 from src.core.lbcp import validate_structural_stability, update_feasibility_map
+from src.utils.item_utils import get_item_dims, get_item_stacking, make_item
 
 
 class RepackTrial:
@@ -240,7 +241,10 @@ class RepackTrial:
         height_map = HeightMap(self.L, self.W, self.H)
         feasibility_map = np.ones((self.L, self.W), dtype=bool)
 
-        for (item_l, item_w, item_h), (x, y, base_height) in zip(remaining_items, remaining_positions):
+        top_item_map = np.full((self.L, self.W), -1, dtype=np.int32)
+
+        for idx, (item, (x, y, base_height)) in enumerate(zip(remaining_items, remaining_positions)):
+            item_l, item_w, item_h = get_item_dims(item)
             support_polygon = None
             if getattr(self.env, 'use_structural_validation', False):
                 obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
@@ -258,6 +262,7 @@ class RepackTrial:
             height_map.update_region(x, y, item_l, item_w, base_height + item_h)
             if support_polygon is not None:
                 feasibility_map = update_feasibility_map(feasibility_map, support_polygon)
+            top_item_map[x:x + item_l, y:y + item_w] = idx
 
         # Items to place: unpacked items
         repack_items = [placed_items[idx] for idx in unpacked_indices]
@@ -267,6 +272,7 @@ class RepackTrial:
         cloned_state['feasibility_map'] = feasibility_map
         cloned_state['placed_items'] = remaining_items.copy()
         cloned_state['placed_positions'] = remaining_positions.copy()
+        cloned_state['top_item_map'] = top_item_map
         cloned_state['items'] = repack_items
         cloned_state['item_indices'] = repack_indices
         cloned_state['positions_by_index'] = positions_by_index
@@ -353,7 +359,9 @@ class RepackTrial:
         if item_idx >= len(items):
             return new_state
 
-        l, w, h = items[item_idx]
+        item = items[item_idx]
+        l, w, h = get_item_dims(item)
+        stacking = get_item_stacking(item)
         if phi == 1:
             l, w = w, l
 
@@ -398,8 +406,15 @@ class RepackTrial:
             placed_positions = []
             new_state['placed_positions'] = placed_positions
 
-        placed_items.append((l, w, h))
+        placed_items.append(make_item(l, w, h, stacking))
         placed_positions.append((x, y, z))
+
+        top_item_map = new_state.get('top_item_map')
+        if top_item_map is None:
+            top_item_map = np.full((self.L, self.W), -1, dtype=np.int32)
+            new_state['top_item_map'] = top_item_map
+        placed_index = len(placed_items) - 1
+        top_item_map[x:x + l, y:y + w] = placed_index
 
         # Update positions_by_index mapping
         item_indices = new_state.get('item_indices', [])
@@ -489,7 +504,8 @@ class RepackTrial:
         height_map = HeightMap(self.L, self.W, self.H)
         new_positions = []
 
-        for item_l, item_w, item_h in items:
+        for item in items:
+            item_l, item_w, item_h = get_item_dims(item)
             placed = False
             for x in range(self.L - item_l + 1):
                 if placed:
@@ -511,7 +527,10 @@ class RepackTrial:
     def _compute_utilization_from_items(self, items):
         if not items:
             return 0.0
-        total_volume = sum(item[0] * item[1] * item[2] for item in items)
+        total_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in items
+        )
         return total_volume / self.container_volume
 
     def _compute_utilization(self, env_state):
@@ -528,5 +547,8 @@ class RepackTrial:
         if len(placed_items) == 0:
             return 0.0
 
-        total_volume = sum(item[0] * item[1] * item[2] for item in placed_items)
+        total_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in placed_items
+        )
         return total_volume / self.container_volume

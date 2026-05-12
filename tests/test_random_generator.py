@@ -45,12 +45,13 @@ class TestRandomGenerator:
         assert isinstance(episode, list), "Episode should be a list"
         assert len(episode) == 5, "Episode should have 5 items"
         
-        # Each item should be a tuple of (length, width, height)
+        # Each item should be a dict with dimensions and stacking
         for item in episode:
-            assert isinstance(item, tuple), "Each item should be a tuple"
-            assert len(item) == 3, "Each item should have 3 dimensions"
-            assert all(isinstance(d, int) for d in item), "All dimensions should be integers"
-            assert all(d > 0 for d in item), "All dimensions should be positive"
+            assert isinstance(item, dict), "Each item should be a dict"
+            assert all(k in item for k in ['l', 'w', 'h', 'stacking'])
+            assert all(isinstance(item[k], int) for k in ['l', 'w', 'h'])
+            assert all(item[k] > 0 for k in ['l', 'w', 'h'])
+            assert item['stacking'] in ['stackable', 'fragile', 'no_stack']
 
     def test_seed_reproducibility(self):
         """Test reproducibility with set_seed or re-initialization."""

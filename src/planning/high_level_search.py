@@ -15,6 +15,7 @@ from .tree_expansion import TreeExpander
 from .repack_trial import RepackTrial
 from ..core.height_map import HeightMap
 from ..core.feasibility_map import FeasibilityMap
+from src.utils.item_utils import get_item_dims, make_item, get_item_stacking
 
 
 class HighLevelSearcher:
@@ -299,7 +300,9 @@ class HighLevelSearcher:
         if item_idx >= len(items):
             return new_state
 
-        l, w, h = items[item_idx]
+        item = items[item_idx]
+        l, w, h = get_item_dims(item)
+        stacking = get_item_stacking(item)
         
         # Apply rotation
         if phi == 1:
@@ -324,8 +327,15 @@ class HighLevelSearcher:
             placed_positions = []
             new_state['placed_positions'] = placed_positions
 
-        placed_items.append((l, w, h))
+        placed_items.append(make_item(l, w, h, stacking))
         placed_positions.append((x, y, z))
+
+        top_item_map = new_state.get('top_item_map')
+        if top_item_map is None:
+            top_item_map = np.full((self.env.L, self.env.W), -1, dtype=np.int32)
+            new_state['top_item_map'] = top_item_map
+        placed_index = len(placed_items) - 1
+        top_item_map[x:x + l, y:y + w] = placed_index
 
         return new_state
 
@@ -362,7 +372,10 @@ class HighLevelSearcher:
         if len(placed_items) == 0:
             return 0.0
 
-        total_volume = sum(item[0] * item[1] * item[2] for item in placed_items)
+        total_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in placed_items
+        )
         container_volume = self.env.L * self.env.W * self.env.H
         
         return total_volume / container_volume

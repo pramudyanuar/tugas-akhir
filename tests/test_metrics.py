@@ -11,9 +11,9 @@ class TestMetrics:
     def test_calculate_utilization(self):
         """Test hitung utilization percentage."""
         placed_items = [
-            (10, 10, 5),   # 500 volume
-            (8, 8, 6),     # 384 volume
-            (6, 6, 4)      # 144 volume
+            {'l': 10, 'w': 10, 'h': 5, 'stacking': 'stackable'},
+            {'l': 8, 'w': 8, 'h': 6, 'stacking': 'stackable'},
+            {'l': 6, 'w': 6, 'h': 4, 'stacking': 'stackable'},
         ]
         container = (30, 30, 30)  # 27000 volume
         
@@ -40,10 +40,10 @@ class TestMetrics:
     def test_calculate_average_height_distribution(self):
         """Test hitung average height distribution."""
         placed_items = [
-            (5, 5, 2),    # height = 2
-            (5, 5, 3),    # height = 3
-            (5, 5, 4),    # height = 4
-            (5, 5, 5),    # height = 5
+            {'l': 5, 'w': 5, 'h': 2, 'stacking': 'stackable'},
+            {'l': 5, 'w': 5, 'h': 3, 'stacking': 'stackable'},
+            {'l': 5, 'w': 5, 'h': 4, 'stacking': 'stackable'},
+            {'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'},
         ]
         
         distribution = Metrics.calculate_average_height_distribution(placed_items)

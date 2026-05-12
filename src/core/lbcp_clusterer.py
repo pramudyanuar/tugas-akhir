@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from src.utils.item_utils import get_item_dims
+
 
 class LBCPClusterer:
     """
@@ -39,7 +41,7 @@ class LBCPClusterer:
         untuk memastikan balanced distribution.
         
         Args:
-            items (list): List of tuples (length, width, height, weight_index)
+            items (list): List of item dicts atau tuples
             
         Returns:
             list: List of clusters, each cluster adalah list of items
@@ -52,11 +54,15 @@ class LBCPClusterer:
         self.cluster_weights = [0.0] * self.num_clusters
         
         # Sort items by volume (descending) untuk better distribution
-        sorted_items = sorted(items, key=lambda x: x[0] * x[1] * x[2], reverse=True)
+        sorted_items = sorted(
+            items,
+            key=lambda x: get_item_dims(x)[0] * get_item_dims(x)[1] * get_item_dims(x)[2],
+            reverse=True,
+        )
         
         # Greedy assignment: assign each item ke cluster dengan min weight
         for item in sorted_items:
-            l, w, h = item[:3]
+            l, w, h = get_item_dims(item)
             item_weight = l * w * h  # Use volume as proxy for weight
             
             # Find cluster dengan minimum current weight
@@ -112,13 +118,21 @@ class LBCPClusterer:
             return 0.5
         
         cluster = self.clusters[cluster_idx]
-        total_volume = sum(item[0] * item[1] * item[2] for item in cluster)
+        total_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in cluster
+        )
         
         if total_volume == 0:
             return 0.5
         
-        weighted_sum = sum((item[0] / 2.0) * item[0] * item[1] * item[2] 
-                          for item in cluster)
+        weighted_sum = sum(
+            (get_item_dims(item)[0] / 2.0)
+            * get_item_dims(item)[0]
+            * get_item_dims(item)[1]
+            * get_item_dims(item)[2]
+            for item in cluster
+        )
         cog = weighted_sum / total_volume / 100.0  # Normalize to [0, 1]
         
         return np.clip(cog, 0.0, 1.0)

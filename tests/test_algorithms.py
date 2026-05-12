@@ -41,7 +41,7 @@ class TestAlgorithm4:
         assert len(items) > 0
         
         # Check utilization
-        total_volume = sum(item[0] * item[1] for item in items)
+        total_volume = sum(item['l'] * item['w'] for item in items)
         container_volume = 23 * 23
         util = total_volume / container_volume
         
@@ -118,7 +118,10 @@ class TestAlgorithm3:
         rt = RepackTrial(container_dims=(59, 23, 23), time_limit=1.0)
         
         env_state = {
-            'placed_items': [(5, 5, 5), (3, 3, 3)],
+            'placed_items': [
+                {'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'},
+                {'l': 3, 'w': 3, 'h': 3, 'stacking': 'stackable'},
+            ],
             'placed_positions': [(0, 0, 0), (5, 0, 0)]
         }
         
@@ -149,7 +152,10 @@ class TestAlgorithm1And2:
         
         # Create simple state
         state = {
-            'items': [(5, 5, 5), (3, 3, 3)],
+            'items': [
+                {'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'},
+                {'l': 3, 'w': 3, 'h': 3, 'stacking': 'stackable'},
+            ],
             'current_index': 0,
             'height_map': HeightMap(20, 10).map,
         }
@@ -180,7 +186,10 @@ class TestAlgorithm1HighLevel:
         
         # Create simple state
         state = {
-            'items': [(5, 5, 5), (3, 3, 3)],
+            'items': [
+                {'l': 5, 'w': 5, 'h': 5, 'stacking': 'stackable'},
+                {'l': 3, 'w': 3, 'h': 3, 'stacking': 'stackable'},
+            ],
             'current_index': 0,
             'height_map': HeightMap(20, 10).map,
             'placed_items': [],
@@ -235,9 +244,8 @@ class TestIntegration:
         
         # All items dari perfect pack should be valid dimensions
         for item in items:
-            assert len(item) == 2
-            assert item[0] > 0 and item[1] > 0
-            assert item[0] <= 23 and item[1] <= 23
+            assert item['l'] > 0 and item['w'] > 0
+            assert item['l'] <= 23 and item['w'] <= 23
 
     def test_full_pipeline_flow(self):
         """Test complete pipeline flow"""
@@ -262,7 +270,7 @@ class TestIntegration:
         
         # 4. Test repack trial
         env_state = {
-            'placed_items': [(3, 3, 3)],
+            'placed_items': [{'l': 3, 'w': 3, 'h': 3, 'stacking': 'stackable'}],
             'placed_positions': [(0, 0, 0)]
         }
         rt = RepackTrial((10, 10, 10))
