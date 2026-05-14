@@ -1,4 +1,5 @@
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 import sys
 import os
 
@@ -35,6 +36,7 @@ class ActionMask:
         self.W = container_width
         self.H = container_height
         self.skip_action_idx = skip_action_idx
+        self._bound_cache = {}
         
     def mask_out_of_bound(self, item_length, item_width, height_map):
         """
@@ -48,14 +50,18 @@ class ActionMask:
         Returns:
             numpy array: Boolean mask (True = valid, False = invalid/masked)
         """
-        mask = np.ones((self.L, self.W), dtype=bool)
-        
-        # Mask jika item akan keluar dari boundary
-        for x in range(self.L):
-            for y in range(self.W):
-                if x + item_length > self.L or y + item_width > self.W:
-                    mask[x, y] = False
-        
+        cache_key = (int(item_length), int(item_width))
+        cached = self._bound_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        mask = np.zeros((self.L, self.W), dtype=bool)
+        max_x = self.L - item_length + 1
+        max_y = self.W - item_width + 1
+        if max_x > 0 and max_y > 0:
+            mask[:max_x, :max_y] = True
+
+        self._bound_cache[cache_key] = mask
         return mask
     
     def mask_overflow(self, item_length, item_width, item_height, height_map):
@@ -71,27 +77,25 @@ class ActionMask:
         Returns:
             numpy array: Boolean mask (True = valid, False = overflow)
         """
-        mask = np.ones((self.L, self.W), dtype=bool)
-        
-        # Mask posisi dimana base_height (max di footprint) + item_height > max_height
+        mask = np.zeros((self.L, self.W), dtype=bool)
+
+        max_x = self.L - item_length + 1
+        max_y = self.W - item_width + 1
+        if max_x <= 0 or max_y <= 0:
+            return mask
+
         hm = height_map.map if hasattr(height_map, 'map') else height_map
-        for x in range(self.L):
-            for y in range(self.W):
-                if x + item_length > self.L or y + item_width > self.W:
-                    mask[x, y] = False
-                    continue
-                if hasattr(height_map, 'max_height_in_region'):
-                    base_height = height_map.max_height_in_region(x, y, item_length, item_width)
-                else:
-                    base_height = np.max(hm[x:x + item_length, y:y + item_width])
-                if base_height + item_height > self.H:
-                    mask[x, y] = False
-        
+        windows = sliding_window_view(hm, (item_length, item_width))
+        base_heights = windows.max(axis=(-2, -1))
+        valid = (base_heights + item_height) <= self.H
+        mask[:max_x, :max_y] = valid
+
         return mask
     
     def mask_unstable_lbcp(self, item_length, item_width, item_height, height_map,
                            feasibility_map=None, use_structural_validation=False,
-                           cog_tolerance=0.15, fast_stability_mask=False):
+                           cog_tolerance=0.15, fast_stability_mask=False,
+                           candidate_mask=None):
         """
         Mask unstable (LBCP): posisi yang akan unstable berdasarkan LBCP validation.
         
@@ -106,51 +110,54 @@ class ActionMask:
         Returns:
             numpy array: Boolean mask (True = stable, False = unstable)
         """
-        mask = np.ones((self.L, self.W), dtype=bool)
-        
-        # Check stabilitas di setiap posisi
+        mask = np.zeros((self.L, self.W), dtype=bool)
+
+        max_x = self.L - item_length + 1
+        max_y = self.W - item_width + 1
+        if max_x <= 0 or max_y <= 0:
+            return mask
+
+        if candidate_mask is None:
+            candidate_mask = np.zeros((self.L, self.W), dtype=bool)
+            candidate_mask[:max_x, :max_y] = True
+
         hm = height_map.map if hasattr(height_map, 'map') else height_map
-        for x in range(self.L):
-            for y in range(self.W):
-                # Cek boundary dulu
-                if x + item_length > self.L or y + item_width > self.W:
-                    mask[x, y] = False
-                    continue
-                
-                # Cek LBCP stability
-                try:
-                    if use_structural_validation and feasibility_map is not None:
-                        if fast_stability_mask:
-                            region_fm = feasibility_map[x:x + item_length, y:y + item_width]
-                            if not np.any(region_fm):
-                                mask[x, y] = False
-                                continue
-                        else:
-                            obj_payload = {'x': x, 'y': y, 'w': item_length, 'd': item_width}
-                            valid, _, _ = validate_structural_stability(
-                                obj_payload,
-                                None,
-                                hm,
-                                feasibility_map,
-                                cog_tolerance,
-                            )
-                            if not valid:
-                                mask[x, y] = False
-                                continue
-                    else:
-                        # Non-structural validation: use relaxed stability check
-                        is_item_stable = is_stable(
-                            hm,
-                            x, y, item_length, item_width, item_height,
-                            self.H,
-                            strict_mode=False,
-                        )
-                        if not is_item_stable:
-                            mask[x, y] = False
-                except Exception:
-                    # Jika ada error di LBCP check, mask posisi ini
-                    mask[x, y] = False
-        
+
+        if use_structural_validation and feasibility_map is not None and fast_stability_mask:
+            windows = sliding_window_view(feasibility_map, (item_length, item_width))
+            valid_fm = windows.any(axis=(-2, -1))
+            mask[:max_x, :max_y] = valid_fm
+            mask &= candidate_mask
+            return mask
+
+        valid_positions = np.argwhere(candidate_mask[:max_x, :max_y])
+        for x, y in valid_positions:
+            try:
+                if use_structural_validation and feasibility_map is not None:
+                    obj_payload = {'x': int(x), 'y': int(y), 'w': item_length, 'd': item_width}
+                    valid, _, _ = validate_structural_stability(
+                        obj_payload,
+                        None,
+                        hm,
+                        feasibility_map,
+                        cog_tolerance,
+                    )
+                    if not valid:
+                        continue
+                else:
+                    is_item_stable = is_stable(
+                        hm,
+                        int(x), int(y), item_length, item_width, item_height,
+                        self.H,
+                        strict_mode=False,
+                    )
+                    if not is_item_stable:
+                        continue
+
+                mask[int(x), int(y)] = True
+            except Exception:
+                continue
+
         return mask
     
     def combine_masks(self, item_length, item_width, item_height,
@@ -182,6 +189,7 @@ class ActionMask:
         # Combine semua masks
         mask_bound = self.mask_out_of_bound(item_length, item_width, height_map)
         mask_overflow = self.mask_overflow(item_length, item_width, item_height, height_map)
+        candidate_mask = mask_bound & mask_overflow
         mask_unstable = self.mask_unstable_lbcp(
             item_length,
             item_width,
@@ -191,6 +199,7 @@ class ActionMask:
             use_structural_validation=use_structural_validation,
             cog_tolerance=cog_tolerance,
             fast_stability_mask=fast_stability_mask,
+            candidate_mask=candidate_mask,
         )
         mask_stacking = self.mask_stacking_policy(
             item_length,

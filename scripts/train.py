@@ -724,7 +724,8 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
           debug_mask=False, debug_actions=False, vis_interval=50, vis_dir='outputs/visualizations',
           blf_only=False, fast_stability_mask=False, repack_cooldown=1,
           layered_min_height=2, layered_max_height=6,
-          pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25):
+          pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
+          checkpoint_steps=0):
     """
     Main training function.
     
@@ -828,6 +829,9 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
     
     # Training loop
     epoch_records = []
+    next_checkpoint = checkpoint_steps if checkpoint_steps > 0 else None
+    checkpoint_dir = Path('logs/training')
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     try:
         for epoch in range(num_epochs):
             training_loop.train_epoch(num_epochs=3, log_frequency=1)
@@ -858,6 +862,15 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
                 checkpoint_path = f"logs/training/checkpoint_epoch_{epoch+1}.pt"
                 ppo.save_checkpoint(checkpoint_path)
                 print(f"Checkpoint saved: {checkpoint_path}\n")
+
+            if next_checkpoint is not None:
+                while training_loop.total_steps >= next_checkpoint:
+                    ckpt_path = checkpoint_dir / f"checkpoint_step_{next_checkpoint}.pt"
+                    ppo.save_checkpoint(str(ckpt_path))
+                    hl_path = checkpoint_dir / f"checkpoint_high_level_step_{next_checkpoint}.pt"
+                    torch.save(training_loop.high_level_agent.state_dict(), hl_path)
+                    print(f"Checkpoint saved: {ckpt_path}")
+                    next_checkpoint += checkpoint_steps
     
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
@@ -1070,7 +1083,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                   batched_envs=4, rollout_steps=32,
                   learning_rate=3e-4, gamma=0.99, entropy_coef=0.01, value_coef=0.5,
                   layered_min_height=2, layered_max_height=6,
-                  pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25):
+                  pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
+                  checkpoint_steps=0):
     envs = []
     for idx in range(int(batched_envs)):
         env = ContainerEnv(
@@ -1127,6 +1141,9 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
 
     total_steps = num_epochs * n_steps
     steps_done = 0
+    next_checkpoint = checkpoint_steps if checkpoint_steps > 0 else None
+    checkpoint_dir = Path('logs/training')
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     while steps_done < total_steps:
         for loop in loops:
@@ -1136,6 +1153,15 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             loop._update_high_level_agent(strategy_buffer)
             a3c.update(next_value=next_value)
             steps_done += rollout_steps
+
+            if next_checkpoint is not None:
+                while steps_done >= next_checkpoint:
+                    ckpt_path = checkpoint_dir / f"batched_step_{next_checkpoint}.pt"
+                    a3c.save_checkpoint(str(ckpt_path))
+                    hl_path = checkpoint_dir / f"batched_high_level_step_{next_checkpoint}.pt"
+                    torch.save(shared_high_level.state_dict(), hl_path)
+                    print(f"Checkpoint saved: {ckpt_path}")
+                    next_checkpoint += checkpoint_steps
 
     return a3c
 
@@ -1165,6 +1191,8 @@ if __name__ == "__main__":
                         help='Use fast stability mask (skip per-position LBCP)')
     parser.add_argument('--repack-cooldown', type=int, default=1,
                         help='Run repack/MCTS every N deadlocks (1 = always)')
+    parser.add_argument('--checkpoint-steps', type=int, default=0,
+                        help='Checkpoint interval (steps) for sync/batched modes')
     parser.add_argument('--async-workers', type=int, default=1,
                         help='Number of async A3C workers (1 = sync training)')
     parser.add_argument('--rollout-steps', type=int, default=32,
@@ -1189,7 +1217,8 @@ if __name__ == "__main__":
         f"vis_interval={args.vis_interval}, blf_only={args.blf_only}, "
         f"fast_mask={args.fast_stability_mask}, repack_cooldown={args.repack_cooldown}, "
         f"async_workers={args.async_workers}, rollout_steps={args.rollout_steps}, "
-        f"batched_envs={args.batched_envs}, async_ckpt_steps={args.async_checkpoint_steps}\n"
+        f"batched_envs={args.batched_envs}, async_ckpt_steps={args.async_checkpoint_steps}, "
+        f"ckpt_steps={args.checkpoint_steps}\n"
     )
     
     # Train with parsed arguments
@@ -1237,6 +1266,7 @@ if __name__ == "__main__":
             pp_sigma=args.pp_sigma,
             pp_size_bias=args.pp_size_bias,
             pp_mean_ratio=args.pp_mean_ratio,
+            checkpoint_steps=args.checkpoint_steps,
         )
     else:
         training_loop, ppo = train(
@@ -1257,6 +1287,7 @@ if __name__ == "__main__":
             pp_sigma=args.pp_sigma,
             pp_size_bias=args.pp_size_bias,
             pp_mean_ratio=args.pp_mean_ratio,
+            checkpoint_steps=args.checkpoint_steps,
         )
     
     print("\nTraining completed successfully!")

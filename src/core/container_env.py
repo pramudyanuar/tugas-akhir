@@ -52,6 +52,9 @@ class ContainerEnv:
         self.perfect_pack_sigma = perfect_pack_sigma
         self.perfect_pack_size_bias = perfect_pack_size_bias
         self.perfect_pack_mean_ratio = perfect_pack_mean_ratio
+        self.invalid_penalty = -0.2
+        self.skip_penalty = -0.05
+        self.step_penalty = 0.01
         
         self.height_map = HeightMap(self.L, self.W, self.H)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
@@ -280,7 +283,7 @@ class ContainerEnv:
         # Skip action (index == L*W)
         if action == self.L * self.W:
             # Skip to next item
-            reward = 0.0
+            reward = self.skip_penalty
             self.current_index += 1
             done = self.current_index >= len(self.items)
             
@@ -296,7 +299,7 @@ class ContainerEnv:
         # Check valid position
         if not self._is_valid_position(x, y, item_l, item_w, item_h, item_stacking):
             # Invalid placement, skip to next item
-            reward = -0.1  # Penalty untuk invalid placement
+            reward = self.invalid_penalty  # Penalty untuk invalid placement
             self.current_index += 1
             done = self.current_index >= len(self.items)
             
@@ -316,7 +319,7 @@ class ContainerEnv:
                 self.cog_tolerance,
             )
             if not valid:
-                reward = -0.1
+                reward = self.invalid_penalty
                 self.current_index += 1
                 done = self.current_index >= len(self.items)
                 next_state, next_mask = self._get_state_and_mask()
@@ -362,7 +365,7 @@ class ContainerEnv:
         utilization_bonus = current_utilization * 2.0  # Encourage filling efficiently
         height_bonus = height_efficiency * 1.0  # Encourage spreading vertically
         
-        reward = volume_reward + utilization_bonus + height_bonus - height_penalty
+        reward = volume_reward + utilization_bonus + height_bonus - height_penalty - self.step_penalty
         
         self.episode_reward += reward
         
