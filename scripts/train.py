@@ -93,11 +93,12 @@ class TrainingLoop:
     - Log metrics: reward, utilization, episode length
     """
     
-    def __init__(self, env, ppo_agent, n_steps=2048, 
+    def __init__(self, env, ppo_agent, n_steps=2048,
                  device='cpu', seed=None, debug_actions=False,
                  vis_interval=10, vis_dir='outputs/visualizations',
                  blf_only=False, repack_cooldown=1,
-                 high_level_agent=None, high_level_optimizer=None):
+                 high_level_agent=None, high_level_optimizer=None,
+                 candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
         """
         Initialize training loop.
         
@@ -131,7 +132,13 @@ class TrainingLoop:
             self.high_level_optimizer = high_level_optimizer
         
         self.candidate_generator = CandidateGenerator(env.L, env.W)
-        self.mcts_budget = 20
+        self.mcts_budget = int(mcts_budget)
+        if candidate_top_k is None:
+            self.candidate_top_k = None
+        else:
+            candidate_top_k = int(candidate_top_k)
+            self.candidate_top_k = None if candidate_top_k <= 0 else candidate_top_k
+        self.use_mcts_prob = float(use_mcts_prob)
         
         self.logger = TrainingLogger()
         self.rearrange_stats = {
@@ -223,7 +230,7 @@ class TrainingLoop:
         candidate_actions = self.candidate_generator.generate_from_macro(
             policy_action_mask,
             macro_decision=macro_decision,
-            top_k=128
+            top_k=self.candidate_top_k
         )
 
         effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
@@ -257,7 +264,21 @@ class TrainingLoop:
             ppo_action, ppo_log_prob, ppo_value = self.ppo.select_action(
                 policy_state, effective_mask
             )
-            
+
+            if self.use_mcts_prob > 0.0:
+                final_action, log_prob, value, mcts_used = self._blend_ppo_mcts_decision(
+                    policy_state,
+                    policy_action_mask,
+                    effective_mask,
+                    ppo_action,
+                    ppo_log_prob,
+                    ppo_value,
+                    use_mcts_prob=self.use_mcts_prob,
+                )
+                if mcts_used:
+                    self.rearrange_stats['mcts_active_used'] += 1
+                return final_action, log_prob, value, effective_mask, strategy_info, policy_state
+
             # Return action from A3C - let the policy learn good placement
             return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info, policy_state
 
@@ -286,7 +307,7 @@ class TrainingLoop:
                 candidate_actions = self.candidate_generator.generate_from_macro(
                     policy_action_mask,
                     macro_decision=macro_decision,
-                    top_k=128
+                    top_k=self.candidate_top_k
                 )
                 effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
                 for idx in candidate_actions:
@@ -321,7 +342,7 @@ class TrainingLoop:
             candidate_actions = self.candidate_generator.generate_from_macro(
                 policy_action_mask,
                 macro_decision=macro_decision,
-                top_k=128
+                top_k=self.candidate_top_k
             )
             effective_mask = np.zeros_like(policy_action_mask, dtype=np.float32)
             for idx in candidate_actions:
@@ -725,7 +746,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
           blf_only=False, fast_stability_mask=False, repack_cooldown=1,
           layered_min_height=2, layered_max_height=6,
           pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
-          checkpoint_steps=0):
+          checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
     """
     Main training function.
     
@@ -825,6 +846,9 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
         vis_dir=vis_dir,
         blf_only=blf_only,
         repack_cooldown=repack_cooldown,
+        candidate_top_k=candidate_top_k,
+        mcts_budget=mcts_budget,
+        use_mcts_prob=use_mcts_prob,
     )
     
     # Training loop
@@ -951,6 +975,9 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
         repack_cooldown=config['repack_cooldown'],
         high_level_agent=shared_high_level,
         high_level_optimizer=shared_high_optimizer,
+        candidate_top_k=config['candidate_top_k'],
+        mcts_budget=config['mcts_budget'],
+        use_mcts_prob=config['use_mcts_prob'],
     )
 
     while True:
@@ -987,7 +1014,8 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
                 async_workers=4, rollout_steps=32, checkpoint_steps=0,
                 learning_rate=3e-4, gamma=0.99, entropy_coef=0.01, value_coef=0.5,
                 layered_min_height=2, layered_max_height=6,
-                pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25):
+                pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
+                candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
     if device != 'cpu':
         print("Async A3C uses CPU workers; switching device to cpu.")
         device = 'cpu'
@@ -1045,6 +1073,9 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         'device': device,
         'checkpoint_steps': int(checkpoint_steps),
         'checkpoint_dir': str(checkpoint_dir),
+        'candidate_top_k': candidate_top_k,
+        'mcts_budget': mcts_budget,
+        'use_mcts_prob': use_mcts_prob,
     }
 
     ctx = mp.get_context('spawn')
@@ -1084,7 +1115,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                   learning_rate=3e-4, gamma=0.99, entropy_coef=0.01, value_coef=0.5,
                   layered_min_height=2, layered_max_height=6,
                   pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
-                  checkpoint_steps=0):
+                  checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
     envs = []
     for idx in range(int(batched_envs)):
         env = ContainerEnv(
@@ -1136,6 +1167,9 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             repack_cooldown=repack_cooldown,
             high_level_agent=shared_high_level,
             high_level_optimizer=high_optimizer,
+            candidate_top_k=candidate_top_k,
+            mcts_budget=mcts_budget,
+            use_mcts_prob=use_mcts_prob,
         )
         loops.append(loop)
 
@@ -1201,6 +1235,12 @@ if __name__ == "__main__":
                         help='Number of envs for single-process batched training')
     parser.add_argument('--async-checkpoint-steps', type=int, default=0,
                         help='Checkpoint interval (steps) for async mode')
+    parser.add_argument('--candidate-top-k', type=int, default=128,
+                        help='Top-k candidates after macro filtering (<=0 for all)')
+    parser.add_argument('--mcts-budget', type=int, default=20,
+                        help='MCTS simulation budget for fallback/planning')
+    parser.add_argument('--use-mcts-prob', type=float, default=0.0,
+                        help='Probability to consult MCTS during regular action selection')
     
     args = parser.parse_args()
     
@@ -1218,7 +1258,8 @@ if __name__ == "__main__":
         f"fast_mask={args.fast_stability_mask}, repack_cooldown={args.repack_cooldown}, "
         f"async_workers={args.async_workers}, rollout_steps={args.rollout_steps}, "
         f"batched_envs={args.batched_envs}, async_ckpt_steps={args.async_checkpoint_steps}, "
-        f"ckpt_steps={args.checkpoint_steps}\n"
+        f"ckpt_steps={args.checkpoint_steps}, candidate_top_k={args.candidate_top_k}, "
+        f"mcts_budget={args.mcts_budget}, use_mcts_prob={args.use_mcts_prob}\n"
     )
     
     # Train with parsed arguments
@@ -1244,6 +1285,9 @@ if __name__ == "__main__":
             pp_sigma=args.pp_sigma,
             pp_size_bias=args.pp_size_bias,
             pp_mean_ratio=args.pp_mean_ratio,
+            candidate_top_k=args.candidate_top_k,
+            mcts_budget=args.mcts_budget,
+            use_mcts_prob=args.use_mcts_prob,
         )
     elif args.batched_envs > 1:
         train_batched(
@@ -1267,6 +1311,9 @@ if __name__ == "__main__":
             pp_size_bias=args.pp_size_bias,
             pp_mean_ratio=args.pp_mean_ratio,
             checkpoint_steps=args.checkpoint_steps,
+            candidate_top_k=args.candidate_top_k,
+            mcts_budget=args.mcts_budget,
+            use_mcts_prob=args.use_mcts_prob,
         )
     else:
         training_loop, ppo = train(
@@ -1288,6 +1335,9 @@ if __name__ == "__main__":
             pp_size_bias=args.pp_size_bias,
             pp_mean_ratio=args.pp_mean_ratio,
             checkpoint_steps=args.checkpoint_steps,
+            candidate_top_k=args.candidate_top_k,
+            mcts_budget=args.mcts_budget,
+            use_mcts_prob=args.use_mcts_prob,
         )
     
     print("\nTraining completed successfully!")
