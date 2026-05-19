@@ -746,7 +746,9 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
           blf_only=False, fast_stability_mask=False, repack_cooldown=1,
           layered_min_height=2, layered_max_height=6,
           pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
-          checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
+          checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
+          early_stop=True, early_stop_metric='utilization_mean',
+          early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
     """
     Main training function.
     
@@ -856,12 +858,33 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
     next_checkpoint = checkpoint_steps if checkpoint_steps > 0 else None
     checkpoint_dir = Path('logs/training')
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    best_metric = None
+    no_improve_epochs = 0
+
+    def get_metric(stats, metric_name):
+        value = stats.get(metric_name)
+        return None if value is None else float(value)
+
     try:
         for epoch in range(num_epochs):
             training_loop.train_epoch(num_epochs=3, log_frequency=1)
 
             # Record per-epoch summary for CSV reporting.
             stats = training_loop.logger.get_stats()
+            current_metric = get_metric(stats, early_stop_metric)
+            if early_stop and current_metric is not None:
+                if best_metric is None or current_metric > (best_metric + early_stop_min_delta):
+                    best_metric = current_metric
+                    no_improve_epochs = 0
+                else:
+                    no_improve_epochs += 1
+
+                if (epoch + 1) >= int(early_stop_min_epochs) and no_improve_epochs >= int(early_stop_patience):
+                    print(
+                        f"Early stop: no improvement in {early_stop_patience} epochs "
+                        f"(metric={early_stop_metric})."
+                    )
+                    break
             rearr_attempts = max(training_loop.rearrange_stats['rearrange_attempts'], 1)
             epoch_records.append({
                 'epoch': epoch + 1,
@@ -1015,7 +1038,9 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
                 learning_rate=3e-4, gamma=0.99, entropy_coef=0.01, value_coef=0.5,
                 layered_min_height=2, layered_max_height=6,
                 pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
-                candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
+                candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
+                early_stop=True, early_stop_metric='utilization_mean',
+                early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
     if device != 'cpu':
         print("Async A3C uses CPU workers; switching device to cpu.")
         device = 'cpu'
@@ -1115,7 +1140,9 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                   learning_rate=3e-4, gamma=0.99, entropy_coef=0.01, value_coef=0.5,
                   layered_min_height=2, layered_max_height=6,
                   pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
-                  checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
+                  checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
+                  early_stop=True, early_stop_metric='utilization_mean',
+                  early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
     envs = []
     for idx in range(int(batched_envs)):
         env = ContainerEnv(
@@ -1175,6 +1202,10 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
 
     total_steps = num_epochs * n_steps
     steps_done = 0
+    next_epoch_step = n_steps
+    epoch_index = 0
+    best_metric = None
+    no_improve_epochs = 0
     next_checkpoint = checkpoint_steps if checkpoint_steps > 0 else None
     checkpoint_dir = Path('logs/training')
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1187,6 +1218,30 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             loop._update_high_level_agent(strategy_buffer)
             a3c.update(next_value=next_value)
             steps_done += rollout_steps
+
+            if steps_done >= next_epoch_step:
+                epoch_index += 1
+                next_epoch_step += n_steps
+
+                stats_list = [l.logger.get_stats() for l in loops if l.logger.get_stats()]
+                if stats_list:
+                    avg_metric = float(
+                        np.mean([s.get(early_stop_metric, 0.0) for s in stats_list])
+                    )
+                    if early_stop:
+                        if best_metric is None or avg_metric > (best_metric + early_stop_min_delta):
+                            best_metric = avg_metric
+                            no_improve_epochs = 0
+                        else:
+                            no_improve_epochs += 1
+
+                        if epoch_index >= int(early_stop_min_epochs) and no_improve_epochs >= int(early_stop_patience):
+                            print(
+                                f"Early stop: no improvement in {early_stop_patience} epochs "
+                                f"(metric={early_stop_metric})."
+                            )
+                            steps_done = total_steps
+                            break
 
             if next_checkpoint is not None:
                 while steps_done >= next_checkpoint:
@@ -1241,6 +1296,16 @@ if __name__ == "__main__":
                         help='MCTS simulation budget for fallback/planning')
     parser.add_argument('--use-mcts-prob', type=float, default=0.0,
                         help='Probability to consult MCTS during regular action selection')
+    parser.add_argument('--no-early-stop', action='store_true',
+                        help='Disable early stopping')
+    parser.add_argument('--early-stop-metric', type=str, default='utilization_mean',
+                        help='Metric for early stopping (utilization_mean or reward_mean)')
+    parser.add_argument('--early-stop-patience', type=int, default=10,
+                        help='Epochs to wait without improvement before stopping')
+    parser.add_argument('--early-stop-min-delta', type=float, default=0.1,
+                        help='Minimum improvement to reset early stop counter')
+    parser.add_argument('--early-stop-min-epochs', type=int, default=10,
+                        help='Minimum epochs before early stopping can trigger')
     
     args = parser.parse_args()
     
@@ -1259,7 +1324,9 @@ if __name__ == "__main__":
         f"async_workers={args.async_workers}, rollout_steps={args.rollout_steps}, "
         f"batched_envs={args.batched_envs}, async_ckpt_steps={args.async_checkpoint_steps}, "
         f"ckpt_steps={args.checkpoint_steps}, candidate_top_k={args.candidate_top_k}, "
-        f"mcts_budget={args.mcts_budget}, use_mcts_prob={args.use_mcts_prob}\n"
+        f"mcts_budget={args.mcts_budget}, use_mcts_prob={args.use_mcts_prob}, "
+        f"early_stop={not args.no_early_stop}, early_stop_metric={args.early_stop_metric}, "
+        f"early_stop_patience={args.early_stop_patience}\n"
     )
     
     # Train with parsed arguments
@@ -1288,6 +1355,11 @@ if __name__ == "__main__":
             candidate_top_k=args.candidate_top_k,
             mcts_budget=args.mcts_budget,
             use_mcts_prob=args.use_mcts_prob,
+            early_stop=not args.no_early_stop,
+            early_stop_metric=args.early_stop_metric,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_min_delta=args.early_stop_min_delta,
+            early_stop_min_epochs=args.early_stop_min_epochs,
         )
     elif args.batched_envs > 1:
         train_batched(
@@ -1314,6 +1386,11 @@ if __name__ == "__main__":
             candidate_top_k=args.candidate_top_k,
             mcts_budget=args.mcts_budget,
             use_mcts_prob=args.use_mcts_prob,
+            early_stop=not args.no_early_stop,
+            early_stop_metric=args.early_stop_metric,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_min_delta=args.early_stop_min_delta,
+            early_stop_min_epochs=args.early_stop_min_epochs,
         )
     else:
         training_loop, ppo = train(
@@ -1338,6 +1415,11 @@ if __name__ == "__main__":
             candidate_top_k=args.candidate_top_k,
             mcts_budget=args.mcts_budget,
             use_mcts_prob=args.use_mcts_prob,
+            early_stop=not args.no_early_stop,
+            early_stop_metric=args.early_stop_metric,
+            early_stop_patience=args.early_stop_patience,
+            early_stop_min_delta=args.early_stop_min_delta,
+            early_stop_min_epochs=args.early_stop_min_epochs,
         )
     
     print("\nTraining completed successfully!")
