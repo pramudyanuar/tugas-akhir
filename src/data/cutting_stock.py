@@ -1,5 +1,7 @@
 import numpy as np
 
+from src.utils.item_utils import make_item, get_item_dims
+
 
 class CuttingStockGenerator:
 	"""
@@ -18,6 +20,7 @@ class CuttingStockGenerator:
 		self.L, self.W, self.H = container_dims
 		self.target_utilization = target_utilization
 		self.min_dim = max(1, int(min_dim))
+		self._stacking_probs = (0.60, 0.25, 0.15)
 
 	def set_seed(self, seed):
 		self.seed = seed
@@ -25,7 +28,7 @@ class CuttingStockGenerator:
 
 	def generate_episode(self, num_items=None):
 		"""
-		Generate episode items dalam format (length, width, height).
+		Generate episode items dalam format dict item.
 		Jika target_utilization diset, total volume diarahkan mendekati container penuh.
 		"""
 		if num_items is not None and num_items <= 0:
@@ -35,11 +38,17 @@ class CuttingStockGenerator:
 			if num_items is None:
 				raise ValueError("num_items wajib untuk generator non-full")
 			items = self._generate_random_items(num_items)
-			items.sort(key=lambda x: x[0] * x[1] * x[2], reverse=True)
+			items.sort(
+				key=lambda x: get_item_dims(x)[0] * get_item_dims(x)[1] * get_item_dims(x)[2],
+				reverse=True,
+			)
 			return items
 
 		items = self._generate_full_items(num_items)
-		items.sort(key=lambda x: x[0] * x[1] * x[2], reverse=True)
+		items.sort(
+			key=lambda x: get_item_dims(x)[0] * get_item_dims(x)[1] * get_item_dims(x)[2],
+			reverse=True,
+		)
 		return items
 
 	def _generate_random_items(self, num_items):
@@ -64,7 +73,7 @@ class CuttingStockGenerator:
 				w = self.rng.randint(8, min(13, self.W) + 1)
 				h = self.rng.randint(6, min(11, self.H) + 1)
 
-			items.append((int(l), int(w), int(h)))
+			items.append(make_item(int(l), int(w), int(h), self._sample_stacking()))
 
 		return items
 
@@ -82,7 +91,8 @@ class CuttingStockGenerator:
 				if remaining_items == 1:
 					item = self._make_filler_item(remaining_volume)
 					items.append(item)
-					remaining_volume -= item[0] * item[1] * item[2]
+					l, w, h = get_item_dims(item)
+					remaining_volume -= l * w * h
 					break
 
 				max_volume_for_item = remaining_volume - (remaining_items - 1) * min_fill_volume
@@ -91,17 +101,20 @@ class CuttingStockGenerator:
 
 				item = self._sample_item(max_volume_for_item)
 				items.append(item)
-				remaining_volume -= item[0] * item[1] * item[2]
+				l, w, h = get_item_dims(item)
+				remaining_volume -= l * w * h
 		else:
 			while remaining_volume > 0:
 				item = self._sample_item(remaining_volume)
 				items.append(item)
-				remaining_volume -= item[0] * item[1] * item[2]
+				l, w, h = get_item_dims(item)
+				remaining_volume -= l * w * h
 
 		while remaining_volume > 0:
 			item = self._make_filler_item(remaining_volume)
 			items.append(item)
-			remaining_volume -= item[0] * item[1] * item[2]
+			l, w, h = get_item_dims(item)
+			remaining_volume -= l * w * h
 
 		return items
 
@@ -122,7 +135,7 @@ class CuttingStockGenerator:
 				h = self.rng.randint(max(self.min_dim, 6), min(11, self.H) + 1)
 			volume = int(l) * int(w) * int(h)
 			if volume <= max_volume:
-				return (int(l), int(w), int(h))
+				return make_item(int(l), int(w), int(h), self._sample_stacking())
 
 		return self._make_filler_item(max_volume)
 
@@ -138,12 +151,20 @@ class CuttingStockGenerator:
 				if remaining_volume % base == 0:
 					h = remaining_volume // base
 					if h <= self.H:
-						return (int(l), int(w), int(max(self.min_dim, h)))
+						return make_item(int(l), int(w), int(max(self.min_dim, h)), self._sample_stacking())
 
 		l = max(self.min_dim, min(self.L, int(np.sqrt(remaining_volume))))
 		w = max(self.min_dim, min(self.W, max(1, remaining_volume // max(1, l * self.H))))
 		h = max(self.min_dim, min(self.H, max(1, remaining_volume // max(1, l * w))))
-		return (int(l), int(w), int(h))
+		return make_item(int(l), int(w), int(h), self._sample_stacking())
+
+	def _sample_stacking(self):
+		u = self.rng.rand()
+		if u < self._stacking_probs[0]:
+			return 'stackable'
+		if u < self._stacking_probs[0] + self._stacking_probs[1]:
+			return 'fragile'
+		return 'no_stack'
 
 
 def generate_episode(num_items=None, seed=None, container_dims=(60, 24, 26), target_utilization=1.0, min_dim=1):

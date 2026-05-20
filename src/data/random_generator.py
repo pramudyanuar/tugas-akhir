@@ -1,5 +1,7 @@
 import numpy as np
 
+from src.utils.item_utils import make_item
+
 class RandomGenerator:
     """
     Random generator untuk generate episode items dengan kontrol seed untuk reproducibility.
@@ -31,10 +33,10 @@ class RandomGenerator:
         self.seed = seed
         self.rng = np.random.RandomState(seed)
     
-    def generate_episode(self, num_items=50, 
-                        length_range=(2, 15), 
-                        width_range=(2, 12), 
-                        height_range=(2, 12)):
+    def generate_episode(self, num_items=50,
+                         length_range=(2, 15),
+                         width_range=(2, 12),
+                         height_range=(2, 12)):
         """
         Generate episode dengan items yang random.
         
@@ -45,7 +47,7 @@ class RandomGenerator:
             height_range (tuple): Range untuk height (min, max)
             
         Returns:
-            list: List of tuples (length, width, height) untuk setiap item
+            list: List of item dicts dengan dimensi dan stacking policy
         """
         if num_items <= 0:
             raise ValueError(f"num_items harus positive, got {num_items}")
@@ -56,7 +58,7 @@ class RandomGenerator:
             length = self.rng.randint(length_range[0], length_range[1] + 1)
             width = self.rng.randint(width_range[0], width_range[1] + 1)
             height = self.rng.randint(height_range[0], height_range[1] + 1)
-            items.append((length, width, height))
+            items.append(make_item(length, width, height, self._sample_stacking()))
         
         return items
     
@@ -68,6 +70,15 @@ class RandomGenerator:
             int: Current seed
         """
         return self.seed
+
+    def _sample_stacking(self):
+        """Sample stacking policy with fixed ratios."""
+        u = self.rng.rand()
+        if u < 0.60:
+            return 'stackable'
+        if u < 0.85:
+            return 'fragile'
+        return 'no_stack'
 
 
 def generate_episode(num_items=50, seed=None,
@@ -85,7 +96,7 @@ def generate_episode(num_items=50, seed=None,
         height_range (tuple): Range untuk height
         
     Returns:
-        list: List of tuples (length, width, height)
+        list: List of item dicts
     """
     generator = RandomGenerator(seed=seed)
     return generator.generate_episode(num_items=num_items,

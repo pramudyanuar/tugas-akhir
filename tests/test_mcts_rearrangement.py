@@ -11,9 +11,9 @@ class TestMCTSRearrangement(unittest.TestCase):
 
         # Build a deterministic placed state to allow unpack/repack simulation.
         self.env.placed_items = [
-            (10, 5, 4),
-            (8, 4, 3),
-            (6, 3, 3),
+            {'l': 10, 'w': 5, 'h': 4, 'stacking': 'stackable'},
+            {'l': 8, 'w': 4, 'h': 3, 'stacking': 'stackable'},
+            {'l': 6, 'w': 3, 'h': 3, 'stacking': 'stackable'},
         ]
         self.env.placed_positions = [
             (0, 0, 0),
@@ -22,13 +22,16 @@ class TestMCTSRearrangement(unittest.TestCase):
         ]
 
         self.env.height_map.reset()
-        for (x, y, z), (l, w, h) in zip(self.env.placed_positions, self.env.placed_items):
+        self.env.top_item_map.fill(-1)
+        for idx, ((x, y, z), item) in enumerate(zip(self.env.placed_positions, self.env.placed_items)):
+            l, w, h = item['l'], item['w'], item['h']
             self.env.height_map.update_region_absolute(x, y, l, w, z + h)
+            self.env.top_item_map[x:x + l, y:y + w] = idx
 
         self.mcts = MCTS(self.env, budget=8, c=1.4, gamma=0.99)
 
     def test_search_rearrangement_returns_expected_keys(self):
-        failed_item = (5, 5, 3)
+        failed_item = {'l': 5, 'w': 5, 'h': 3, 'stacking': 'stackable'}
         result = self.mcts.search_rearrangement(
             failed_item=failed_item,
             max_unpack=2,
@@ -46,7 +49,7 @@ class TestMCTSRearrangement(unittest.TestCase):
         self.assertLessEqual(result['best_value'], 1.0)
 
     def test_search_rearrangement_apply_flag_updates_env_safely(self):
-        failed_item = (4, 4, 2)
+        failed_item = {'l': 4, 'w': 4, 'h': 2, 'stacking': 'stackable'}
         result = self.mcts.search_rearrangement(
             failed_item=failed_item,
             max_unpack=3,
@@ -54,7 +57,8 @@ class TestMCTSRearrangement(unittest.TestCase):
         )
 
         # Applied state must still be physically bounded.
-        for (x, y, z), (l, w, h) in zip(self.env.placed_positions, self.env.placed_items):
+        for (x, y, z), item in zip(self.env.placed_positions, self.env.placed_items):
+            l, w, h = item['l'], item['w'], item['h']
             self.assertLessEqual(x + l, self.env.L)
             self.assertLessEqual(y + w, self.env.W)
             self.assertLessEqual(z + h, self.env.H)

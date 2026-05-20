@@ -21,6 +21,7 @@ from src.planning.high_level_search import HighLevelSearcher
 from src.learning.agents.oracle_policy import OraclePolicy, RandomPolicy
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
+from src.utils.item_utils import get_item_dims, make_item
 
 
 class EvaluationMetrics:
@@ -63,7 +64,7 @@ class EvaluationMetrics:
         Compute volume utilization efficiency.
         
         Args:
-            placed_items: List of tuples (length, width, height)
+            placed_items: List of item dicts atau tuples
             
         Returns:
             float: Utilization percentage (0-100)
@@ -71,7 +72,10 @@ class EvaluationMetrics:
         if len(placed_items) == 0:
             return 0.0
         
-        total_volume = sum(l * w * h for l, w, h in placed_items)
+        total_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in placed_items
+        )
         utilization = (total_volume / self.container_volume) * 100.0
         
         return min(utilization, 100.0)
@@ -88,7 +92,7 @@ class EvaluationMetrics:
         
         Args:
             placed_positions: List of tuples (x, y, base_height)
-            placed_items: List of tuples (length, width, height)
+            placed_items: List of item dicts atau tuples
             height_map: 2D array of heights
             
         Returns:
@@ -114,7 +118,7 @@ class EvaluationMetrics:
         
         for pos, item in zip(placed_positions, placed_items):
             x, y, _ = pos
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             
             # Compute center dari item
             item_center_x = x + l / 2.0
@@ -150,7 +154,7 @@ class EvaluationMetrics:
         
         for pos, item in zip(placed_positions, placed_items):
             x, y, _ = pos
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             item_weight = l * w * h
             
             item_cog_x = x + l / 2.0
@@ -185,7 +189,7 @@ class EvaluationMetrics:
         Args:
             height_map: 2D array of heights
             placed_positions: List of tuples (x, y, base_height)
-            placed_items: List of tuples (length, width, height)
+            placed_items: List of item dicts atau tuples
             
         Returns:
             dict: {
@@ -205,7 +209,7 @@ class EvaluationMetrics:
         
         for pos, item in zip(placed_positions, placed_items):
             x, y, _ = pos
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             
             try:
                 if is_stable(height_map, x, y, l, w, h, self.H):
@@ -436,8 +440,13 @@ class EvaluationMetrics:
         Select low-level action from candidate set using masked policy sampling.
         """
         height_map_tensor = torch.FloatTensor(env.height_map.map).unsqueeze(0).unsqueeze(0)
-        item = env.items[env.current_index] if env.current_index < len(env.items) else (1, 1, 1)
-        item_dim = torch.FloatTensor([item[0] / env.L, item[1] / env.W, item[2] / env.H]).unsqueeze(0)
+        item = env.items[env.current_index] if env.current_index < len(env.items) else make_item(1, 1, 1)
+        item_l, item_w, item_h = get_item_dims(item)
+        item_dim = torch.FloatTensor([
+            item_l / env.L,
+            item_w / env.W,
+            item_h / env.H,
+        ]).unsqueeze(0)
 
         with torch.no_grad():
             logits = model_low(height_map_tensor, item_dim)

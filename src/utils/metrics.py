@@ -1,6 +1,8 @@
 import numpy as np
 from typing import List, Tuple
 
+from src.utils.item_utils import get_item_dims
+
 class Metrics:
     """
     Metrics calculator untuk mengukur performa 3D bin packing.
@@ -20,7 +22,7 @@ class Metrics:
         Utilization = (total volume dari placed items / total volume container) * 100%
         
         Args:
-            placed_items: List of tuples (length, width, height) untuk items yang ditempatkan
+            placed_items: List of item dicts atau tuples
             container_dims: Tuple (L, W, H) dimensi container
             
         Returns:
@@ -34,7 +36,10 @@ class Metrics:
             raise ValueError("Container dimensions must be positive")
         
         # Hitung total volume dari placed items
-        total_placed_volume = sum(item[0] * item[1] * item[2] for item in placed_items)
+        total_placed_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in placed_items
+        )
         
         utilization = (total_placed_volume / container_volume) * 100.0
         
@@ -78,7 +83,7 @@ class Metrics:
         - Height distribution histogram
         
         Args:
-            placed_items: List of tuples (length, width, height)
+            placed_items: List of item dicts atau tuples
             positions: Optional list of tuples (x, y, z) posisi items
             
         Returns:
@@ -100,11 +105,14 @@ class Metrics:
                 'histogram': {}
             }
         
-        heights = np.array([item[2] for item in placed_items])
+        heights = np.array([get_item_dims(item)[2] for item in placed_items])
         
         # Jika positions diberikan, hitung actual stacking height
         if positions:
-            actual_heights = np.array([pos[2] + item[2] for pos, item in zip(positions, placed_items)])
+            actual_heights = np.array([
+                pos[2] + get_item_dims(item)[2]
+                for pos, item in zip(positions, placed_items)
+            ])
         else:
             actual_heights = heights
         

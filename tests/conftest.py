@@ -22,7 +22,11 @@ def repacker():
 @pytest.fixture
 def test_items():
 	"""Sample items for repack tests."""
-	return [(10, 10, 10), (8, 8, 8), (6, 6, 6)]
+	return [
+		{'l': 10, 'w': 10, 'h': 10, 'stacking': 'stackable'},
+		{'l': 8, 'w': 8, 'h': 8, 'stacking': 'stackable'},
+		{'l': 6, 'w': 6, 'h': 6, 'stacking': 'stackable'},
+	]
 
 
 @pytest.fixture

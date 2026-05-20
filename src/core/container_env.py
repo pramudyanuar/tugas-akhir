@@ -13,6 +13,7 @@ from src.data.random_generator import RandomGenerator
 from src.data.cutting_stock import CuttingStockGenerator
 from src.data.perfect_pack_generator import PerfectPackGenerator
 from src.planning.repack_trial import RepackTrial
+from src.utils.item_utils import get_item_dims, get_item_stacking, make_item
 
 
 class ContainerEnv:
@@ -25,7 +26,7 @@ class ContainerEnv:
                  use_structural_validation=True, cog_tolerance=0.15,
                  layered_min_height=2, layered_max_height=6,
                  perfect_pack_sigma=4, perfect_pack_size_bias=3.0,
-                 perfect_pack_mean_ratio=0.25):
+                 perfect_pack_mean_ratio=0.25, fast_stability_mask=False):
         """
         Initialize container environment.
         
@@ -45,15 +46,20 @@ class ContainerEnv:
         self.dataset_type = dataset_type
         self.use_structural_validation = use_structural_validation
         self.cog_tolerance = cog_tolerance
+        self.fast_stability_mask = bool(fast_stability_mask)
         self.layered_min_height = max(1, int(layered_min_height))
         self.layered_max_height = max(self.layered_min_height, int(layered_max_height))
         self.perfect_pack_sigma = perfect_pack_sigma
         self.perfect_pack_size_bias = perfect_pack_size_bias
         self.perfect_pack_mean_ratio = perfect_pack_mean_ratio
+        self.invalid_penalty = -0.2
+        self.skip_penalty = -0.05
+        self.step_penalty = 0.01
         
         self.height_map = HeightMap(self.L, self.W, self.H)
         self.action_mask_calculator = ActionMask(self.L, self.W, self.H)
         self.feasibility_map = np.ones((self.L, self.W), dtype=bool)
+        self.top_item_map = np.full((self.L, self.W), -1, dtype=np.int32)
         self.debug_mask_stats = False
         if dataset_type == 'cutting_stock':
             self.dataset_generator = CuttingStockGenerator(
@@ -110,6 +116,8 @@ class ContainerEnv:
         """
         self.height_map.reset()
         self.feasibility_map.fill(True)
+        self.top_item_map.fill(-1)
+        self.top_item_map.fill(-1)
         
         if seed is not None:
             self.dataset_generator.set_seed(seed)
@@ -157,9 +165,12 @@ class ContainerEnv:
         
         # Get current item
         if item_dims is None:
-            item_l, item_w, item_h = self.items[self.current_index]
+            current_item = self.items[self.current_index]
+            item_l, item_w, item_h = get_item_dims(current_item)
+            item_stacking = get_item_stacking(current_item)
         else:
             item_l, item_w, item_h = item_dims
+            item_stacking = 'stackable'
 
         if orientation is not None:
             item_l, item_w, item_h = self._rotate_item_dims(
@@ -184,18 +195,26 @@ class ContainerEnv:
             item_w,
             item_h,
             self.height_map,
+            top_item_map=self.top_item_map,
+            placed_items=self.placed_items,
+            item_stacking=item_stacking,
             feasibility_map=self.feasibility_map,
             use_structural_validation=self.use_structural_validation,
             cog_tolerance=self.cog_tolerance,
+            fast_stability_mask=self.fast_stability_mask,
         )
         action_mask = self.action_mask_calculator.get_action_vector(
             item_l,
             item_w,
             item_h,
             self.height_map,
+            top_item_map=self.top_item_map,
+            placed_items=self.placed_items,
+            item_stacking=item_stacking,
             feasibility_map=self.feasibility_map,
             use_structural_validation=self.use_structural_validation,
             cog_tolerance=self.cog_tolerance,
+            fast_stability_mask=self.fast_stability_mask,
         )
 
         if self.debug_mask_stats:
@@ -245,7 +264,9 @@ class ContainerEnv:
         if self.current_index >= len(self.items):
             return self._get_state_and_mask(), 0.0, True, {'success': False}
         
-        item_l, item_w, item_h = self.items[self.current_index]
+        current_item = self.items[self.current_index]
+        item_l, item_w, item_h = get_item_dims(current_item)
+        item_stacking = get_item_stacking(current_item)
         orientation = None
 
         if isinstance(action, (tuple, list)) and len(action) == 2:
@@ -262,7 +283,7 @@ class ContainerEnv:
         # Skip action (index == L*W)
         if action == self.L * self.W:
             # Skip to next item
-            reward = 0.0
+            reward = self.skip_penalty
             self.current_index += 1
             done = self.current_index >= len(self.items)
             
@@ -276,9 +297,9 @@ class ContainerEnv:
         y = action // self.L
         
         # Check valid position
-        if not self._is_valid_position(x, y, item_l, item_w, item_h):
+        if not self._is_valid_position(x, y, item_l, item_w, item_h, item_stacking):
             # Invalid placement, skip to next item
-            reward = -0.1  # Penalty untuk invalid placement
+            reward = self.invalid_penalty  # Penalty untuk invalid placement
             self.current_index += 1
             done = self.current_index >= len(self.items)
             
@@ -298,7 +319,7 @@ class ContainerEnv:
                 self.cog_tolerance,
             )
             if not valid:
-                reward = -0.1
+                reward = self.invalid_penalty
                 self.current_index += 1
                 done = self.current_index >= len(self.items)
                 next_state, next_mask = self._get_state_and_mask()
@@ -315,16 +336,20 @@ class ContainerEnv:
             self.feasibility_map = update_feasibility_map(self.feasibility_map, support_polygon)
         
         # Store placement info
-        self.placed_items.append((item_l, item_w, item_h))
+        self.placed_items.append(make_item(item_l, item_w, item_h, item_stacking))
         self.placed_positions.append((x, y, base_height))
+        placed_index = len(self.placed_items) - 1
+        self.top_item_map[x:x + item_l, y:y + item_w] = placed_index
         
         # Option 1: Enhanced reward function for efficient packing
         # Encourages both volume utilization AND bottom-up filling
         item_volume = item_l * item_w * item_h
         
         # Current container utilization
-        total_placed_volume = sum(item[0] * item[1] * item[2] 
-                                 for item in self.placed_items)
+        total_placed_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in self.placed_items
+        )
         current_utilization = total_placed_volume / self.container_volume
         
         # Height efficiency penalty: penalize stacking too high
@@ -340,7 +365,7 @@ class ContainerEnv:
         utilization_bonus = current_utilization * 2.0  # Encourage filling efficiently
         height_bonus = height_efficiency * 1.0  # Encourage spreading vertically
         
-        reward = volume_reward + utilization_bonus + height_bonus - height_penalty
+        reward = volume_reward + utilization_bonus + height_bonus - height_penalty - self.step_penalty
         
         self.episode_reward += reward
         
@@ -358,7 +383,7 @@ class ContainerEnv:
         
         return (next_state, next_mask), reward, done, info
     
-    def _is_valid_position(self, x, y, item_l, item_w, item_h):
+    def _is_valid_position(self, x, y, item_l, item_w, item_h, item_stacking=None):
         """
         Check if position is valid (boundary + overflow + stability).
         
@@ -378,6 +403,10 @@ class ContainerEnv:
         if base_height + item_h > self.H:
             return False
         
+        # Check stacking policy
+        if not self._stacking_allows_placement(x, y, item_l, item_w, item_stacking):
+            return False
+
         # Check stability with LBCP
         try:
             if self.use_structural_validation:
@@ -419,8 +448,10 @@ class ContainerEnv:
         if not self.placed_items:
             return 0.0
         
-        total_placed_volume = sum(item[0] * item[1] * item[2] 
-                                 for item in self.placed_items)
+        total_placed_volume = sum(
+            get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2]
+            for item in self.placed_items
+        )
         utilization = (total_placed_volume / self.container_volume) * 100.0
         
         return min(utilization, 100.0)
@@ -468,6 +499,7 @@ class ContainerEnv:
             'placed_items': self.placed_items,
             'placed_positions': self.placed_positions,
             'feasibility_map': self.feasibility_map,
+            'top_item_map': self.top_item_map,
         }
         repack_result = repack_trial.attempt_repack(env_state, require_full_pack=False)
         
@@ -496,7 +528,8 @@ class ContainerEnv:
         self.height_map.reset()
         self.feasibility_map.fill(True)
 
-        for (item_l, item_w, item_h), (x, y, base_height) in zip(self.placed_items, new_positions):
+        for idx, (item, (x, y, base_height)) in enumerate(zip(self.placed_items, new_positions)):
+            item_l, item_w, item_h = get_item_dims(item)
             if self.use_structural_validation:
                 obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
                 valid, support_polygon, _ = validate_structural_stability(
@@ -518,6 +551,7 @@ class ContainerEnv:
 
             new_height = base_height + item_h
             self.height_map.update_region(x, y, item_l, item_w, new_height)
+            self.top_item_map[x:x + item_l, y:y + item_w] = idx
 
             if self.use_structural_validation:
                 self.feasibility_map = update_feasibility_map(
@@ -547,6 +581,32 @@ class ContainerEnv:
             'description': 'Repacking applied',
             'strategy': 'repack_trial'
         }
+
+    def _stacking_allows_placement(self, x, y, item_l, item_w, item_stacking):
+        if item_stacking is None:
+            item_stacking = 'stackable'
+
+        base_height = self.height_map.max_height_in_region(x, y, item_l, item_w)
+        if base_height <= 0:
+            return True
+
+        region = self.height_map.map[x:x + item_l, y:y + item_w]
+        support_mask = region == base_height
+        if not np.any(support_mask):
+            return True
+
+        support_indices = set(self.top_item_map[x:x + item_l, y:y + item_w][support_mask].tolist())
+        for idx in support_indices:
+            if idx < 0 or idx >= len(self.placed_items):
+                continue
+            support_item = self.placed_items[idx]
+            support_stack = get_item_stacking(support_item)
+            if support_stack == 'no_stack':
+                return False
+            if support_stack == 'fragile' and item_stacking != 'fragile':
+                return False
+
+        return True
     
     def render(self):
         """Print container state."""
