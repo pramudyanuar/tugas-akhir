@@ -1,9 +1,14 @@
 import numpy as np
+from collections import OrderedDict
+import hashlib
 
 class CandidateGenerator:
     def __init__(self, grid_L, grid_W):
         self.L = grid_L
         self.W = grid_W
+        # LRU cache for sorted candidates (key: (mask_hash, zone_priority) -> sorted_actions)
+        self._sort_cache = OrderedDict()
+        self._sort_cache_max = 256
 
     def generate_all(self):
         candidates = []
@@ -11,10 +16,16 @@ class CandidateGenerator:
             for y in range(self.W):
                 candidates.append((x, y))
         return candidates
+    
+    def clear_cache(self):
+        """Clear candidate sorting cache to free memory."""
+        self._sort_cache.clear()
 
     def generate_from_macro(self, action_mask, macro_decision=None, top_k=128):
         """
         Generate candidate actions berdasarkan macro decision dari high-level agent.
+        
+        Uses LRU cache to avoid re-sorting identical masks with same zone_priority.
 
         Args:
             action_mask (np.ndarray): Valid action mask (L*W + 1)
@@ -42,16 +53,36 @@ class CandidateGenerator:
         if len(valid_actions) == 0:
             return []
 
-        scored_candidates = []
-        for action in valid_actions:
-            x = action % self.L
-            y = action // self.L
-            score = self._zone_score(x, y, zone_priority)
-            scored_candidates.append((score, action))
+        # Compute cache key from mask hash + zone priority
+        try:
+            mask_hash = hashlib.md5(np.asarray(action_mask[:self.L * self.W]).tobytes()).hexdigest()[:8]
+        except Exception:
+            mask_hash = None
 
-        # Sort descending score, score lebih tinggi = prioritas lebih tinggi.
-        scored_candidates.sort(key=lambda t: t[0], reverse=True)
-        sorted_actions = [action for _, action in scored_candidates]
+        cache_key = (mask_hash, zone_priority) if mask_hash else None
+
+        # Check cache
+        if cache_key is not None and cache_key in self._sort_cache:
+            sorted_actions = self._sort_cache[cache_key]
+            self._sort_cache.move_to_end(cache_key)
+        else:
+            # Compute scores and sort
+            scored_candidates = []
+            for action in valid_actions:
+                x = action % self.L
+                y = action // self.L
+                score = self._zone_score(x, y, zone_priority)
+                scored_candidates.append((score, action))
+
+            # Sort descending score, score lebih tinggi = prioritas lebih tinggi.
+            scored_candidates.sort(key=lambda t: t[0], reverse=True)
+            sorted_actions = [action for _, action in scored_candidates]
+            
+            # Cache result
+            if cache_key is not None:
+                self._sort_cache[cache_key] = sorted_actions
+                if len(self._sort_cache) > self._sort_cache_max:
+                    self._sort_cache.popitem(last=False)
 
         if top_k is not None and top_k > 0:
             return sorted_actions[:top_k]

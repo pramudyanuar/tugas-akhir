@@ -103,6 +103,10 @@ class ContainerEnv:
         self.state_size = self.L * self.W + 3 + 1
         # Action size: positions (L*W) + skip action
         self.action_size = self.L * self.W + 1
+        
+        # Pre-allocate state buffer for faster state creation (avoid repeated allocation/concat)
+        self._state_buffer = np.zeros(self.state_size, dtype=np.float32)
+        self._normalized_height_buffer = np.zeros((self.L, self.W), dtype=np.float32)
     
     def reset(self, seed=None):
         """
@@ -149,7 +153,7 @@ class ContainerEnv:
     
     def _get_state_and_mask(self, item_dims=None, orientation=None):
         """
-        Get current state dan action mask.
+        Get current state dan action mask (optimized with pre-allocated buffers).
         
         State format: [height_map.flatten(), item_length, item_width, item_height, min_available_height]
         
@@ -177,17 +181,25 @@ class ContainerEnv:
                 item_l, item_w, item_h, orientation
             )
         
-        # Create state: normalized height_map + item dims + min height info
-        normalized_height = self.height_map.normalize().flatten()
-        item_dims = np.array([item_l / self.L, item_w / self.W, item_h / self.H], 
-                            dtype=np.float32)
+        # Optimized state creation using pre-allocated buffers (avoid repeated concat)
+        # Normalize height_map in-place
+        hm_max = np.max(self.height_map.map)
+        if hm_max > 0:
+            self._normalized_height_buffer[:] = self.height_map.map / self.H
+        else:
+            self._normalized_height_buffer[:] = 0.0
         
-        # Option 3: Add min_height_info to encourage bottom-up filling
-        # This helps the network learn to prefer lower positions
+        # Fill state buffer
+        hm_size = self.L * self.W
+        self._state_buffer[:hm_size] = self._normalized_height_buffer.ravel()
+        self._state_buffer[hm_size] = item_l / self.L
+        self._state_buffer[hm_size + 1] = item_w / self.W
+        self._state_buffer[hm_size + 2] = item_h / self.H
+        
         min_height = np.min(self.height_map.map) / self.H  # Normalized
-        min_height_info = np.array([min_height], dtype=np.float32)
+        self._state_buffer[hm_size + 3] = min_height
         
-        state = np.concatenate([normalized_height, item_dims, min_height_info])
+        state = self._state_buffer.copy()  # Return copy to avoid external mutations
         
         # Get action mask
         masking_result = self.action_mask_calculator.combine_masks(

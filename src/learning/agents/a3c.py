@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from collections import OrderedDict
 
 from src.learning.models.actor_critic import ActorCriticNetwork
 from src.common.memory import Memory
@@ -69,6 +70,30 @@ class A3C:
 
         self.memory = Memory()
 
+    @staticmethod
+    def _state_fingerprint(state):
+        """Compute fast fingerprint of state for caching (using hash)."""
+        try:
+            if isinstance(state, np.ndarray):
+                return hash(state.tobytes())
+            else:
+                return hash(tuple(state))
+        except Exception:
+            return None
+
+    def clear_cache(self):
+        """Clear forward pass cache to free memory between episodes."""
+        if hasattr(self, '_forward_cache'):
+            self._forward_cache.clear()
+    
+    @property
+    def _forward_cache(self):
+        """Lazy-initialized LRU cache for forward pass results."""
+        if not hasattr(self, '_fc'):
+            self._fc = OrderedDict()
+            self._fc_max_size = 512
+        return self._fc
+
     def mask_logits(self, logits, action_mask):
         """Mask logits berdasarkan action mask."""
         if action_mask.dtype != torch.bool:
@@ -80,11 +105,25 @@ class A3C:
 
     def select_action(self, state, action_mask):
         """Select action menggunakan softmax sampling dari masked logits."""
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        action_mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
+        # Check cache first
+        cache_key = self._state_fingerprint(state)
+        if cache_key is not None and cache_key in self._forward_cache:
+            cached_result = self._forward_cache[cache_key]
+            self._forward_cache.move_to_end(cache_key)
+            logits, value = cached_result
+        else:
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
 
-        with torch.no_grad():
-            logits, value = self.network(state_tensor)
+            with torch.no_grad():
+                logits, value = self.network(state_tensor)
+            
+            # Cache result (store on CPU to save GPU memory)
+            if cache_key is not None:
+                self._forward_cache[cache_key] = (logits.cpu(), value.cpu())
+                if len(self._forward_cache) > self._forward_cache_max_size:
+                    self._forward_cache.popitem(last=False)
+
+        action_mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
 
         masked_logits = self.mask_logits(logits, action_mask_tensor)
         probs = F.softmax(masked_logits, dim=-1)
@@ -95,6 +134,47 @@ class A3C:
         log_prob = dist.log_prob(action)
 
         return action.item(), log_prob.item(), value.item()
+
+    def select_actions_batch(self, states, action_masks):
+        """
+        Batch action selection for multiple states (faster than sequential calls).
+        
+        Args:
+            states: List of states or numpy array (N, state_size)
+            action_masks: List of action masks or numpy array (N, action_size)
+            
+        Returns:
+            list: [(action, log_prob, value), ...] for each state
+        """
+        if isinstance(states, list):
+            states = np.array(states)
+        if isinstance(action_masks, list):
+            action_masks = np.array(action_masks)
+        
+        batch_size = len(states)
+        state_tensor = torch.FloatTensor(states).to(self.device)
+        action_mask_tensor = torch.FloatTensor(action_masks).to(self.device)
+        
+        with torch.no_grad():
+            logits, values = self.network(state_tensor)
+        
+        results = []
+        for i in range(batch_size):
+            mask_i = action_mask_tensor[i:i+1]
+            logit_i = logits[i:i+1]
+            value_i = values[i:i+1]
+            
+            masked_logits = self.mask_logits(logit_i, mask_i)
+            probs = F.softmax(masked_logits, dim=-1)
+            probs = torch.where(torch.isnan(probs), torch.zeros_like(probs), probs)
+            
+            dist = Categorical(probs)
+            action = dist.sample()
+            log_prob = dist.log_prob(action)
+            
+            results.append((action.item(), log_prob.item(), value_i.item()))
+        
+        return results
 
     def store_transition(self, state, action, reward, value, log_prob,
                         action_mask, done):

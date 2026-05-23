@@ -9,6 +9,13 @@ from src.utils.item_utils import get_item_stacking
 from .height_map import HeightMap
 from .lbcp import is_stable, validate_structural_stability
 
+# Parallel processing (optional, fallback to sequential if unavailable)
+try:
+    from joblib import Parallel, delayed
+    HAS_JOBLIB = True
+except ImportError:
+    HAS_JOBLIB = False
+
 
 class ActionMask:
     """
@@ -37,6 +44,48 @@ class ActionMask:
         self.H = container_height
         self.skip_action_idx = skip_action_idx
         self._bound_cache = {}
+    
+    @staticmethod
+    def _validate_single_position(x, y, item_length, item_width, item_height, 
+                                  height_map, max_height,
+                                  use_structural_validation, feasibility_map, 
+                                  cog_tolerance):
+        """
+        Validate a single position for stability (used in parallel processing).
+        
+        Args:
+            x, y: Position coordinates
+            item_length, item_width, item_height: Item dimensions
+            height_map: Height map array
+            max_height: Container max height
+            use_structural_validation: Whether to use LBCP validation
+            feasibility_map: Feasibility map for LBCP
+            cog_tolerance: CoG tolerance for LBCP
+            
+        Returns:
+            tuple: (x, y, is_valid) - position and validation result
+        """
+        try:
+            if use_structural_validation and feasibility_map is not None:
+                obj_payload = {'x': int(x), 'y': int(y), 'w': item_length, 'd': item_width}
+                valid, _, _ = validate_structural_stability(
+                    obj_payload,
+                    None,
+                    height_map,
+                    feasibility_map,
+                    cog_tolerance,
+                )
+                return (x, y, valid)
+            else:
+                is_item_stable = is_stable(
+                    height_map,
+                    int(x), int(y), item_length, item_width, item_height,
+                    max_height,
+                    strict_mode=False,
+                )
+                return (x, y, is_item_stable)
+        except Exception:
+            return (x, y, False)
         
     def mask_out_of_bound(self, item_length, item_width, height_map):
         """
@@ -100,6 +149,7 @@ class ActionMask:
         Mask unstable (LBCP): posisi yang akan unstable berdasarkan LBCP validation.
         
         Menggunakan LBCP untuk check apakah item akan stabil di posisi tersebut.
+        Parallel processing digunakan ketika ada banyak kandidat.
         
         Args:
             item_length (int): Panjang item
@@ -123,6 +173,7 @@ class ActionMask:
 
         hm = height_map.map if hasattr(height_map, 'map') else height_map
 
+        # Fast path: use feasibility_map with sliding window (very fast, approximate)
         if use_structural_validation and feasibility_map is not None and fast_stability_mask:
             windows = sliding_window_view(feasibility_map, (item_length, item_width))
             valid_fm = windows.any(axis=(-2, -1))
@@ -130,33 +181,31 @@ class ActionMask:
             mask &= candidate_mask
             return mask
 
+        # Slow path: run full LBCP validation per position
         valid_positions = np.argwhere(candidate_mask[:max_x, :max_y])
-        for x, y in valid_positions:
-            try:
-                if use_structural_validation and feasibility_map is not None:
-                    obj_payload = {'x': int(x), 'y': int(y), 'w': item_length, 'd': item_width}
-                    valid, _, _ = validate_structural_stability(
-                        obj_payload,
-                        None,
-                        hm,
-                        feasibility_map,
-                        cog_tolerance,
-                    )
-                    if not valid:
-                        continue
-                else:
-                    is_item_stable = is_stable(
-                        hm,
-                        int(x), int(y), item_length, item_width, item_height,
-                        self.H,
-                        strict_mode=False,
-                    )
-                    if not is_item_stable:
-                        continue
-
-                mask[int(x), int(y)] = True
-            except Exception:
-                continue
+        
+        # Use parallel processing if joblib is available and we have many candidates
+        if HAS_JOBLIB and len(valid_positions) > 32:
+            # Parallel batch validation
+            results = Parallel(n_jobs=-1, backend='threading')(
+                delayed(self._validate_single_position)(
+                    int(x), int(y), item_length, item_width, item_height,
+                    hm, self.H, use_structural_validation, feasibility_map, cog_tolerance
+                )
+                for x, y in valid_positions
+            )
+            for x, y, is_valid in results:
+                if is_valid:
+                    mask[x, y] = True
+        else:
+            # Sequential fallback for few candidates or without joblib
+            for x, y in valid_positions:
+                _, _, is_valid = self._validate_single_position(
+                    x, y, item_length, item_width, item_height,
+                    hm, self.H, use_structural_validation, feasibility_map, cog_tolerance
+                )
+                if is_valid:
+                    mask[x, y] = True
 
         return mask
     
