@@ -26,7 +26,8 @@ class ContainerEnv:
                  use_structural_validation=True, cog_tolerance=0.15,
                  layered_min_height=2, layered_max_height=6,
                  perfect_pack_sigma=4, perfect_pack_size_bias=3.0,
-                 perfect_pack_mean_ratio=0.25, fast_stability_mask=False):
+                 perfect_pack_mean_ratio=0.25, fast_stability_mask=False,
+                 max_episode_length=500):
         """
         Initialize container environment.
         
@@ -43,6 +44,7 @@ class ContainerEnv:
         self.W = container_width
         self.H = container_height
         self.max_items = max_items
+        self.max_episode_length = max(100, int(max_episode_length))  # Minimum 100 steps per episode
         self.dataset_type = dataset_type
         self.use_structural_validation = use_structural_validation
         self.cog_tolerance = cog_tolerance
@@ -272,6 +274,10 @@ class ContainerEnv:
         """
         self.episode_length += 1
         
+        # Force episode done if max length reached (for large item sets)
+        if self.episode_length > self.max_episode_length:
+            return self._get_state_and_mask(), 0.0, True, {'success': False, 'reason': 'max_episode_length'}
+        
         # Check if episode done
         if self.current_index >= len(self.items):
             return self._get_state_and_mask(), 0.0, True, {'success': False}
@@ -299,6 +305,8 @@ class ContainerEnv:
             self.current_index += 1
             done = self.current_index >= len(self.items)
             
+            self.episode_reward += reward  # Accumulate penalty
+            
             next_state, next_mask = self._get_state_and_mask()
             info = {'success': False, 'action_type': 'skip'}
             
@@ -314,6 +322,8 @@ class ContainerEnv:
             reward = self.invalid_penalty  # Penalty untuk invalid placement
             self.current_index += 1
             done = self.current_index >= len(self.items)
+            
+            self.episode_reward += reward  # Accumulate penalty
             
             next_state, next_mask = self._get_state_and_mask()
             info = {'success': False, 'action_type': 'invalid'}
@@ -334,6 +344,7 @@ class ContainerEnv:
                 reward = self.invalid_penalty
                 self.current_index += 1
                 done = self.current_index >= len(self.items)
+                self.episode_reward += reward  # Accumulate penalty
                 next_state, next_mask = self._get_state_and_mask()
                 info = {'success': False, 'action_type': 'invalid'}
                 return (next_state, next_mask), reward, done, info

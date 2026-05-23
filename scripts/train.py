@@ -822,6 +822,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
         perfect_pack_size_bias=pp_size_bias,
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
+        max_episode_length=n_steps * 2,  # Allow 2x rollout steps per episode
     )
     env.debug_mask_stats = bool(debug_mask)
     state, action_mask = env.reset()
@@ -1011,6 +1012,7 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
         perfect_pack_size_bias=config['pp_size_bias'],
         perfect_pack_mean_ratio=config['pp_mean_ratio'],
         fast_stability_mask=config['fast_stability_mask'],
+        max_episode_length=config['rollout_steps'] * 2,
     )
     env.debug_mask_stats = bool(config['debug_mask'])
 
@@ -1101,6 +1103,7 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         perfect_pack_size_bias=pp_size_bias,
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
+        max_episode_length=rollout_steps * 2,
     )
     state_size = env.state_size
     action_size = env.action_size
@@ -1200,6 +1203,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             perfect_pack_size_bias=pp_size_bias,
             perfect_pack_mean_ratio=pp_mean_ratio,
             fast_stability_mask=fast_stability_mask,
+            max_episode_length=rollout_steps * 2,
         )
         env.debug_mask_stats = bool(debug_mask)
         envs.append(env)
