@@ -99,7 +99,7 @@ class TrainingLoop:
                  blf_only=False, repack_cooldown=1,
                  high_level_agent=None, high_level_optimizer=None,
                  candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
-                 progress_interval=25):
+                 progress_interval=25, loop_id=None):
         """
         Initialize training loop.
         
@@ -116,6 +116,7 @@ class TrainingLoop:
         self.device = device
         self.seed = seed
         self.debug_actions = bool(debug_actions)
+        self.loop_id = loop_id
 
         # Hierarchical components for macro decision + candidate selection.
         if high_level_agent is None:
@@ -572,7 +573,8 @@ class TrainingLoop:
             self.seed += 1  # Increment seed untuk variety
 
         print(
-            f"Collect rollout | target_steps={n_steps} | "
+            f"Collect rollout | loop={self.loop_id if self.loop_id is not None else 'main'} | "
+            f"target_steps={n_steps} | "
             f"progress_interval={self.progress_interval} | "
             f"episode={self.episode_count} | total_steps={self.total_steps}",
             flush=True,
@@ -629,7 +631,8 @@ class TrainingLoop:
 
             if self.total_steps % self.progress_interval == 0:
                 print(
-                    f"Step progress | total_steps={self.total_steps} | "
+                    f"Step progress | loop={self.loop_id if self.loop_id is not None else 'main'} | "
+                    f"total_steps={self.total_steps} | "
                     f"rollout={steps_collected}/{n_steps} | "
                     f"episodes={self.episode_count} | "
                     f"current_episode_steps={self.env.episode_length} | "
@@ -1199,7 +1202,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
     high_optimizer = torch.optim.Adam(shared_high_level.parameters(), lr=1e-4)
 
     loops = []
-    for env in envs:
+    for env_idx, env in enumerate(envs):
         loop = TrainingLoop(
             env=env,
             a3c_agent=a3c,
@@ -1216,6 +1219,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             candidate_top_k=candidate_top_k,
             mcts_budget=mcts_budget,
             use_mcts_prob=use_mcts_prob,
+            loop_id=env_idx,
         )
         loops.append(loop)
 
@@ -1237,6 +1241,11 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             loop._update_high_level_agent(strategy_buffer)
             a3c.update(next_value=next_value)
             steps_done += rollout_steps
+            print(
+                f"Global progress | steps_done={steps_done}/{total_steps} | "
+                f"last_loop={loop.loop_id} | episodes={[l.episode_count for l in loops]}",
+                flush=True,
+            )
 
             if steps_done >= next_epoch_step:
                 epoch_index += 1
