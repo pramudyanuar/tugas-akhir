@@ -120,7 +120,8 @@ class A3C:
             # Cache result (store on CPU to save GPU memory)
             if cache_key is not None:
                 self._forward_cache[cache_key] = (logits.cpu(), value.cpu())
-                if len(self._forward_cache) > self._forward_cache_max_size:
+                # Enforce max cache size (use _fc_max_size from property)
+                if hasattr(self, '_fc_max_size') and len(self._forward_cache) > self._fc_max_size:
                     self._forward_cache.popitem(last=False)
 
         action_mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
