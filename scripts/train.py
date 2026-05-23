@@ -93,24 +93,25 @@ class TrainingLoop:
     - Log metrics: reward, utilization, episode length
     """
     
-    def __init__(self, env, ppo_agent, n_steps=2048,
+    def __init__(self, env, a3c_agent, n_steps=2048,
                  device='cpu', seed=None, debug_actions=False,
                  vis_interval=10, vis_dir='outputs/visualizations',
                  blf_only=False, repack_cooldown=1,
                  high_level_agent=None, high_level_optimizer=None,
-                 candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0):
+                 candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
+                 progress_interval=25):
         """
         Initialize training loop.
         
         Args:
             env (ContainerEnv): Environment
-            ppo_agent (A3C): A3C agent
+            a3c_agent (A3C): A3C agent
             n_steps (int): Number of steps to collect per update
             device (str): 'cpu' atau 'cuda'
             seed (int): Random seed
         """
         self.env = env
-        self.ppo = ppo_agent
+        self.a3c = a3c_agent
         self.n_steps = n_steps
         self.device = device
         self.seed = seed
@@ -141,6 +142,7 @@ class TrainingLoop:
         self.use_mcts_prob = float(use_mcts_prob)
         
         self.logger = TrainingLogger()
+        self.progress_interval = max(1, int(progress_interval))
         self.rearrange_stats = {
             'deadlocks': 0,
             'rearrange_attempts': 0,
@@ -261,18 +263,18 @@ class TrainingLoop:
                 return action, log_prob, value, effective_mask, strategy_info, policy_state
 
             # Use A3C agent to select position with masked action space
-            ppo_action, ppo_log_prob, ppo_value = self.ppo.select_action(
+            a3c_action, a3c_log_prob, a3c_value = self.a3c.select_action(
                 policy_state, effective_mask
             )
 
             if self.use_mcts_prob > 0.0:
-                final_action, log_prob, value, mcts_used = self._blend_ppo_mcts_decision(
+                final_action, log_prob, value, mcts_used = self._blend_a3c_mcts_decision(
                     policy_state,
                     policy_action_mask,
                     effective_mask,
-                    ppo_action,
-                    ppo_log_prob,
-                    ppo_value,
+                    a3c_action,
+                    a3c_log_prob,
+                    a3c_value,
                     use_mcts_prob=self.use_mcts_prob,
                 )
                 if mcts_used:
@@ -280,7 +282,7 @@ class TrainingLoop:
                 return final_action, log_prob, value, effective_mask, strategy_info, policy_state
 
             # Return action from A3C - let the policy learn good placement
-            return ppo_action, ppo_log_prob, ppo_value, effective_mask, strategy_info, policy_state
+            return a3c_action, a3c_log_prob, a3c_value, effective_mask, strategy_info, policy_state
 
         self.rearrange_stats['deadlocks'] += 1
         self.deadlock_streak += 1
@@ -315,7 +317,7 @@ class TrainingLoop:
                         effective_mask[idx] = 1.0
 
                 if np.sum(effective_mask[:-1]) > 0:
-                    action, log_prob, value = self.ppo.select_action(policy_state, effective_mask)
+                    action, log_prob, value = self.a3c.select_action(policy_state, effective_mask)
                     return action, log_prob, value, effective_mask, strategy_info, policy_state
 
         # If still deadlocked, use MCTS as planner fallback.
@@ -350,7 +352,7 @@ class TrainingLoop:
                     effective_mask[idx] = 1.0
 
             if np.sum(effective_mask[:-1]) > 0:
-                action, log_prob, value = self.ppo.select_action(policy_state, effective_mask)
+                action, log_prob, value = self.a3c.select_action(policy_state, effective_mask)
                 return action, log_prob, value, effective_mask, strategy_info, policy_state
 
         mcts_result = mcts.search(policy_state, policy_action_mask, depth_limit=5)
@@ -374,9 +376,9 @@ class TrainingLoop:
         mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            logits, value = self.ppo.network(state_tensor)
+            logits, value = self.a3c.network(state_tensor)
 
-        masked_logits = self.ppo.mask_logits(logits, mask_tensor)
+        masked_logits = self.a3c.mask_logits(logits, mask_tensor)
         probs = F.softmax(masked_logits, dim=-1)
         probs = torch.where(torch.isnan(probs), torch.zeros_like(probs), probs)
 
@@ -390,7 +392,7 @@ class TrainingLoop:
 
         return log_prob.item(), value.item()
     
-    def _blend_ppo_mcts_decision(self, state, action_mask, effective_mask, ppo_action, ppo_log_prob, ppo_value, use_mcts_prob=0.2):
+    def _blend_a3c_mcts_decision(self, state, action_mask, effective_mask, a3c_action, a3c_log_prob, a3c_value, use_mcts_prob=0.2):
         """
         Blend A3C action with MCTS search results.
         
@@ -398,9 +400,9 @@ class TrainingLoop:
             state: Current state
             action_mask: Full action mask
             effective_mask: Filtered action mask from candidates
-            ppo_action: Action selected by A3C
-            ppo_log_prob: Log probability from A3C
-            ppo_value: Value estimate from A3C
+            a3c_action: Action selected by A3C
+            a3c_log_prob: Log probability from A3C
+            a3c_value: Value estimate from A3C
             use_mcts_prob: Probability of consulting MCTS (default 0.2 = 20%)
             
         Returns:
@@ -411,7 +413,7 @@ class TrainingLoop:
         mcts_used = False
         
         if not use_mcts:
-            return ppo_action, ppo_log_prob, ppo_value, False
+            return a3c_action, a3c_log_prob, a3c_value, False
         
         try:
             # Run MCTS search with limited budget
@@ -429,20 +431,20 @@ class TrainingLoop:
                     mcts_used = True
                 else:
                     # Blend: use A3C action but let A3C know about MCTS preference
-                    final_action = ppo_action
-                    log_prob, value = ppo_log_prob, ppo_value
+                    final_action = a3c_action
+                    log_prob, value = a3c_log_prob, a3c_value
                     mcts_used = False
             else:
                 # MCTS action was invalid, stick with A3C
-                final_action = ppo_action
-                log_prob, value = ppo_log_prob, ppo_value
+                final_action = a3c_action
+                log_prob, value = a3c_log_prob, a3c_value
                 mcts_used = False
                 
             return final_action, log_prob, value, mcts_used
             
         except Exception as e:
             # If MCTS fails, fall back to A3C
-            return ppo_action, ppo_log_prob, ppo_value, False
+            return a3c_action, a3c_log_prob, a3c_value, False
     
     def _update_high_level_agent(self, strategy_buffer, num_epochs=3):
         """
@@ -568,6 +570,13 @@ class TrainingLoop:
         timing['episode_reset_s'] += time.perf_counter() - reset_start
         if self.seed is not None:
             self.seed += 1  # Increment seed untuk variety
+
+        print(
+            f"Collect rollout | target_steps={n_steps} | "
+            f"progress_interval={self.progress_interval} | "
+            f"episode={self.episode_count} | total_steps={self.total_steps}",
+            flush=True,
+        )
         
         while steps_collected < n_steps:
             # Select action with hierarchical control (sample strategies for training).
@@ -597,7 +606,7 @@ class TrainingLoop:
             
             # Store low-level transition
             store_start = time.perf_counter()
-            self.ppo.store_transition(
+            self.a3c.store_transition(
                 state=policy_state,
                 action=action,
                 reward=reward,
@@ -617,6 +626,16 @@ class TrainingLoop:
             
             steps_collected += 1
             self.total_steps += 1
+
+            if self.total_steps % self.progress_interval == 0:
+                print(
+                    f"Step progress | total_steps={self.total_steps} | "
+                    f"rollout={steps_collected}/{n_steps} | "
+                    f"episodes={self.episode_count} | "
+                    f"current_episode_steps={self.env.episode_length} | "
+                    f"current_episode_reward={self.env.episode_reward:.4f}",
+                    flush=True,
+                )
             
             state = next_state
             action_mask = next_mask
@@ -691,7 +710,7 @@ class TrainingLoop:
         
         # Update A3C network
         print(f"Updating A3C network... ", end='', flush=True)
-        self.ppo.update(next_value=next_value)
+        self.a3c.update(next_value=next_value)
         print("Done!\n")
 
         epoch_elapsed = time.perf_counter() - epoch_start
@@ -823,7 +842,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
     
     # Initialize A3C agent
     print("Initializing A3C agent...")
-    ppo = A3C(
+    a3c = A3C(
         state_size=state_size,
         action_size=action_size,
         L=env.L,  # Pass actual container dimensions
@@ -839,7 +858,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
     # Initialize training loop
     training_loop = TrainingLoop(
         env=env,
-        ppo_agent=ppo,
+        a3c_agent=a3c,
         n_steps=n_steps,
         device=device,
         seed=seed,
@@ -907,13 +926,13 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
             # Save checkpoint
             if (epoch + 1) % 5 == 0:
                 checkpoint_path = f"logs/training/checkpoint_epoch_{epoch+1}.pt"
-                ppo.save_checkpoint(checkpoint_path)
+                a3c.save_checkpoint(checkpoint_path)
                 print(f"Checkpoint saved: {checkpoint_path}\n")
 
             if next_checkpoint is not None:
                 while training_loop.total_steps >= next_checkpoint:
                     ckpt_path = checkpoint_dir / f"checkpoint_step_{next_checkpoint}.pt"
-                    ppo.save_checkpoint(str(ckpt_path))
+                    a3c.save_checkpoint(str(ckpt_path))
                     hl_path = checkpoint_dir / f"checkpoint_high_level_step_{next_checkpoint}.pt"
                     torch.save(training_loop.high_level_agent.state_dict(), hl_path)
                     print(f"Checkpoint saved: {ckpt_path}")
@@ -946,7 +965,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
             writer.writerows(epoch_records)
         print(f"Training metrics CSV saved: {csv_path}")
     
-    return training_loop, ppo
+    return training_loop, a3c
 
 
 def _a3c_worker(worker_id, shared_model, shared_optimizer,
@@ -987,7 +1006,7 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
 
     loop = TrainingLoop(
         env=env,
-        ppo_agent=a3c,
+        a3c_agent=a3c,
         n_steps=config['rollout_steps'],
         device=config['device'],
         seed=worker_seed,
@@ -1183,7 +1202,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
     for env in envs:
         loop = TrainingLoop(
             env=env,
-            ppo_agent=a3c,
+            a3c_agent=a3c,
             n_steps=rollout_steps,
             device=device,
             seed=seed,
@@ -1393,7 +1412,7 @@ if __name__ == "__main__":
             early_stop_min_epochs=args.early_stop_min_epochs,
         )
     else:
-        training_loop, ppo = train(
+        training_loop, a3c = train(
             num_epochs=args.num_epochs,
             n_steps=args.n_steps,
             seed=args.seed,

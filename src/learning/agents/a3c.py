@@ -1,7 +1,7 @@
 """Asynchronous Advantage Actor-Critic (A3C) Low-Level Agent.
 
-This is a synchronous single-process variant that follows the A3C loss
-(Policy + Value - Entropy) while keeping the same API as PPO for compatibility.
+This is a synchronous single-process variant that follows the A3C loss:
+policy loss + value loss - entropy bonus.
 """
 
 import numpy as np
