@@ -127,7 +127,7 @@ class HighLevelAgent(nn.Module):
     
     def forward(self, state, items_batch=None):
         """
-        Forward pass untuk high-level decision making (with caching).
+        Forward pass untuk high-level decision making (with safe caching).
         
         Args:
             state: Normalized state tensor (batch_size or 1, input_dim)
@@ -144,15 +144,21 @@ class HighLevelAgent(nn.Module):
         if state.dim() == 1:
             state = state.unsqueeze(0)
         
-        # Compute state hash for cache lookup
-        state_np = state.detach().cpu().numpy()
-        state_hash = self._compute_hash(state_np)
+        # Only use forward cache during inference (eval mode), not during training
+        use_forward_cache = not self.training
+        cached_logits = None
         
-        # Check forward cache
-        if state_hash is not None and state_hash in self._forward_cache:
-            cached_logits = self._forward_cache[state_hash]
-            self._forward_cache.move_to_end(state_hash)
-        else:
+        if use_forward_cache:
+            # Compute state hash for cache lookup (inference only)
+            state_np = state.detach().cpu().numpy()
+            state_hash = self._compute_hash(state_np)
+            
+            # Check forward cache
+            if state_hash is not None and state_hash in self._forward_cache:
+                cached_logits = self._forward_cache[state_hash]
+                self._forward_cache.move_to_end(state_hash)
+        
+        if cached_logits is None:
             # Forward pass through network
             x = self.fc1(state)
             x = self.relu(x)
@@ -162,15 +168,19 @@ class HighLevelAgent(nn.Module):
             # Strategy logits
             cached_logits = self.strategy_head(x)
             
-            # Cache result
-            if state_hash is not None:
+            # Cache result only during inference
+            if use_forward_cache and state_hash is not None:
                 self._forward_cache[state_hash] = cached_logits.detach().cpu()
                 if len(self._forward_cache) > self._forward_cache_max:
                     self._forward_cache.popitem(last=False)
+        else:
+            # Load cached logits back to correct device
+            if isinstance(cached_logits, torch.Tensor) and cached_logits.device != state.device:
+                cached_logits = cached_logits.to(state.device)
         
-        strategy_logits = cached_logits.to(state.device) if isinstance(cached_logits, torch.Tensor) and cached_logits.device != state.device else cached_logits
+        strategy_logits = cached_logits
         
-        # LBCP clustering jika ada items
+        # LBCP clustering jika ada items (cache-safe, non-tensor result)
         cluster_assignment = None
         load_balance = 1.0
         
