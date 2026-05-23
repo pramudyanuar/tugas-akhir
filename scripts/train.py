@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.core.container_env import ContainerEnv
 from src.core.candidate_generator import CandidateGenerator
+from src.core.stability_validator import StabilityValidator
 from src.learning.models.high_level_agent import HighLevelAgent
 from src.learning.agents.a3c import A3C
 from src.learning.agents.shared_optim import SharedAdam
@@ -548,6 +549,15 @@ class TrainingLoop:
         Returns:
             dict: Collected trajectories
         """
+        # Clear all caches to free memory between rollouts
+        StabilityValidator.clear_cache()
+        if hasattr(self.a3c, 'clear_cache'):
+            self.a3c.clear_cache()
+        if hasattr(self.high_level_agent, 'clear_cache'):
+            self.high_level_agent.clear_cache()
+        if hasattr(self.candidate_generator, 'clear_cache'):
+            self.candidate_generator.clear_cache()
+        
         steps_collected = 0
         timing = {
             'action_select_s': 0.0,

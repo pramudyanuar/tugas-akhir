@@ -3,6 +3,19 @@
 import numpy as np
 from scipy.spatial import ConvexHull
 from matplotlib.path import Path
+import zlib
+from collections import OrderedDict
+
+# Optional numba JIT for geometric functions
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    def njit(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
 
 
 class StabilityValidator:
@@ -17,6 +30,13 @@ class StabilityValidator:
     """
     
     @staticmethod
+    def clear_cache():
+        """Clear validation cache to free memory (call periodically between episodes)."""
+        if hasattr(StabilityValidator, '_validate_cache'):
+            StabilityValidator._validate_cache.clear()
+    
+    @staticmethod
+    @njit
     def compute_support_cells(height_map, x, y, l, w, base_height):
         """
         Support cell extraction: mengekstrak semua sel dari region yang bertumpu
@@ -184,6 +204,11 @@ class StabilityValidator:
         Returns:
             tuple: (valid, support_polygon, support_height)
         """
+        # Simple LRU cache to avoid repeating expensive hull/point-inside checks
+        if not hasattr(StabilityValidator, '_validate_cache'):
+            StabilityValidator._validate_cache = OrderedDict()
+            StabilityValidator._validate_cache_max = 4096
+
         if new_object is None:
             return False, np.array([]).reshape(0, 2), None
 
@@ -204,6 +229,28 @@ class StabilityValidator:
 
         # Algorithm 1 line 10: support height is min height in the region.
         support_height = np.min(region)
+
+        # Compute small fingerprints for caching (cheap checksum)
+        try:
+            hm_hash = zlib.adler32(region.tobytes())
+        except Exception:
+            hm_hash = None
+        fm_hash = None
+        try:
+            if fm is not None:
+                fm_region = fm[xi:xi + wi, yi:yi + di]
+                fm_hash = zlib.adler32(fm_region.tobytes())
+        except Exception:
+            fm_hash = None
+
+        cache_key = (int(xi), int(yi), int(wi), int(di), int(support_height), hm_hash, fm_hash, float(cog_tolerance))
+        cache = StabilityValidator._validate_cache
+        if cache_key in cache:
+            # Move to end (recently used)
+            cache.move_to_end(cache_key)
+            cached_valid, cached_hull_list, cached_support_height = cache[cache_key]
+            hull_arr = np.array(cached_hull_list) if cached_hull_list is not None and len(cached_hull_list) else np.array([]).reshape(0, 2)
+            return cached_valid, hull_arr, cached_support_height
 
         # Algorithm 1 line 11: contact points at support height
         contact_cells = StabilityValidator.compute_support_cells(
@@ -238,6 +285,11 @@ class StabilityValidator:
         try:
             hull_points, _ = StabilityValidator.compute_convex_hull(support_points)
         except Exception:
+            # Cache negative result to avoid repeated convex hull attempts
+            cache[cache_key] = (False, None, support_height)
+            # enforce max size
+            if len(cache) > StabilityValidator._validate_cache_max:
+                cache.popitem(last=False)
             return False, np.array([]).reshape(0, 2), support_height
 
         # Compute CoG set and check containment
@@ -245,6 +297,12 @@ class StabilityValidator:
         path = Path(hull_points)
         inside_mask = path.contains_points(cog_set)
         is_valid = bool(np.all(inside_mask))
+
+        # Store into cache (store hull as list for lightness)
+        hull_list = hull_points.tolist() if hull_points is not None and len(hull_points) else None
+        cache[cache_key] = (is_valid, hull_list, support_height)
+        if len(cache) > StabilityValidator._validate_cache_max:
+            cache.popitem(last=False)
 
         return is_valid, hull_points, support_height
 

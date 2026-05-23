@@ -32,7 +32,8 @@ HIERARCHICAL BENEFITS:
 import torch
 import torch.nn as nn
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
+import hashlib
 
 from src.core.lbcp import LBCPClusterer
 
@@ -99,10 +100,34 @@ class HighLevelAgent(nn.Module):
         # State tracking
         self.current_clusters = None
         self.cluster_assignment = None
+        
+        # Caching infrastructure
+        self._forward_cache = OrderedDict()  # Forward pass cache
+        self._forward_cache_max = 256
+        self._lbcp_cache = OrderedDict()     # LBCP clustering cache
+        self._lbcp_cache_max = 128
+    
+    def clear_cache(self):
+        """Clear all caches to free memory between episodes."""
+        self._forward_cache.clear()
+        self._lbcp_cache.clear()
+    
+    @staticmethod
+    def _compute_hash(data):
+        """Compute hash fingerprint for caching."""
+        try:
+            if isinstance(data, np.ndarray):
+                return hashlib.md5(data.tobytes()).hexdigest()[:8]
+            elif isinstance(data, list):
+                return hashlib.md5(np.array(data).tobytes()).hexdigest()[:8]
+            else:
+                return None
+        except Exception:
+            return None
     
     def forward(self, state, items_batch=None):
         """
-        Forward pass untuk high-level decision making.
+        Forward pass untuk high-level decision making (with caching).
         
         Args:
             state: Normalized state tensor (batch_size or 1, input_dim)
@@ -119,24 +144,58 @@ class HighLevelAgent(nn.Module):
         if state.dim() == 1:
             state = state.unsqueeze(0)
         
-        # Forward pass through network
-        x = self.fc1(state)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.relu(x)
+        # Compute state hash for cache lookup
+        state_np = state.detach().cpu().numpy()
+        state_hash = self._compute_hash(state_np)
         
-        # Strategy logits
-        strategy_logits = self.strategy_head(x)
+        # Check forward cache
+        if state_hash is not None and state_hash in self._forward_cache:
+            cached_logits = self._forward_cache[state_hash]
+            self._forward_cache.move_to_end(state_hash)
+        else:
+            # Forward pass through network
+            x = self.fc1(state)
+            x = self.relu(x)
+            x = self.fc2(x)
+            x = self.relu(x)
+            
+            # Strategy logits
+            cached_logits = self.strategy_head(x)
+            
+            # Cache result
+            if state_hash is not None:
+                self._forward_cache[state_hash] = cached_logits.detach().cpu()
+                if len(self._forward_cache) > self._forward_cache_max:
+                    self._forward_cache.popitem(last=False)
+        
+        strategy_logits = cached_logits.to(state.device) if isinstance(cached_logits, torch.Tensor) and cached_logits.device != state.device else cached_logits
         
         # LBCP clustering jika ada items
         cluster_assignment = None
         load_balance = 1.0
         
         if items_batch is not None and len(items_batch) > 0:
-            clusters = self.lbcp_module.cluster_by_weight(items_batch)
-            cluster_assignment = clusters
-            load_balance = self.lbcp_module.compute_load_balance()
-            self.current_clusters = clusters
+            items_hash = self._compute_hash([item for item in items_batch])
+            
+            # Check LBCP cache
+            if items_hash is not None and items_hash in self._lbcp_cache:
+                cached_clusters, cached_balance = self._lbcp_cache[items_hash]
+                self._lbcp_cache.move_to_end(items_hash)
+                cluster_assignment = cached_clusters
+                load_balance = cached_balance
+            else:
+                # Compute clustering
+                clusters = self.lbcp_module.cluster_by_weight(items_batch)
+                cluster_assignment = clusters
+                load_balance = self.lbcp_module.compute_load_balance()
+                
+                # Cache result
+                if items_hash is not None:
+                    self._lbcp_cache[items_hash] = (clusters, load_balance)
+                    if len(self._lbcp_cache) > self._lbcp_cache_max:
+                        self._lbcp_cache.popitem(last=False)
+            
+            self.current_clusters = cluster_assignment
             self.cluster_assignment = cluster_assignment
         
         return {

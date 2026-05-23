@@ -121,6 +121,8 @@ class MCTS:
         """
         Run MCTS search dan return best action.
         
+        With early termination: stops when best action has sufficient visits.
+        
         Args:
             state: Current state
             action_mask: Valid actions mask
@@ -147,7 +149,11 @@ class MCTS:
         # Create root node
         root = MCTSNode(state, untried_actions=valid_actions)
         
-        # Run simulations
+        # Early termination parameters
+        early_term_ratio = 0.7  # Stop if best action has 70% of visits
+        early_term_threshold = min(self.budget // 3, 10)  # Min simulations before early termination
+        
+        # Run simulations with early termination
         for sim in range(self.budget):
             # Selection & Expansion
             node = self._tree_policy(root, valid_actions)
@@ -157,6 +163,13 @@ class MCTS:
             
             # Backprop
             node.backup(reward)
+            
+            # Early termination check: if best action dominant, stop
+            if sim > early_term_threshold and len(root.children) > 0:
+                best_child = max(root.children.values(), key=lambda n: n.visits)
+                if best_child.visits > (root.visits * early_term_ratio):
+                    # Best action is dominant, stop searching
+                    break
         
         # Select best action berdasarkan visit count (exploitation)
         best_child = max(root.children.values(), key=lambda n: n.visits)
