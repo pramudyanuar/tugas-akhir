@@ -1,19 +1,15 @@
-"""Oracle/Baseline Policy for Bin Packing Comparison."""
+"""Oracle/Baseline policies for 3D container loading comparison."""
 
 import numpy as np
 from src.core.lbcp import LBCPClusterer
 
 
 class OraclePolicy:
-    """
-    Greedy oracle policy untuk 3D bin packing.
-    
-    Strategy:
-    1. Prioritize placement in positions yang maintain load balance
-    2. Prefer positions yang minimize center of gravity deviation
-    3. Select orientations yang fit best (first-fit-decreasing)
-    
-    This serves as a strong baseline untuk evaluate learned policies.
+    """Greedy baseline policy for 3D container loading.
+
+    The policy always chooses from the same valid action mask as the learned
+    A3C low-level agent, so comparisons stay fair: all baselines obey the same
+    geometric and stability filters from the environment.
     """
     
     def __init__(self, env, priority='load_balance'):
@@ -22,7 +18,8 @@ class OraclePolicy:
         
         Args:
             env: ContainerEnv instance
-            priority (str): 'load_balance', 'height', atau 'nearest_center'
+            priority (str): 'load_balance', 'height', 'nearest_center',
+                            'dblf', atau 'bottom_left_front'
         """
         self.env = env
         self.priority = priority
@@ -52,9 +49,22 @@ class OraclePolicy:
             return self._select_minimal_height(valid_actions)
         elif self.priority == 'nearest_center':
             return self._select_nearest_center(valid_actions)
+        elif self.priority in ('dblf', 'bottom_left_front', 'blf'):
+            return self._select_dblf(valid_actions)
         else:
             # Default: random valid action
             return valid_actions[np.random.randint(len(valid_actions))]
+
+    def _coords(self, action):
+        """Convert flattened action index to (x, y) grid coordinate."""
+        return action % self.env.L, action // self.env.L
+
+    def _height_at(self, x, y):
+        """Read height map value using the environment's (x, y) convention."""
+        try:
+            return self.env.height_map.map[x, y]
+        except AttributeError:
+            return self.env.height_map[x, y]
     
     def _select_load_balance(self, valid_actions):
         """
@@ -71,15 +81,14 @@ class OraclePolicy:
         for action in valid_actions:
             # Get 2D position from action index
             if action < self.env.L * self.env.W:
-                x = action % self.env.L
-                y = action // self.env.L
+                x, y = self._coords(action)
                 
                 # Prefer positions near the center
                 center_x, center_y = self.env.L / 2, self.env.W / 2
                 distance_to_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
                 
                 # Also prefer lower positions (better stability)
-                min_height = self.env.height_map[y, x] if y < self.env.height_map.shape[0] and x < self.env.height_map.shape[1] else 0
+                min_height = self._height_at(x, y)
                 height_score = 1.0 / (1 + min_height)  # Prefer lower heights
                 
                 # Combined score: balance + height preference
@@ -103,10 +112,8 @@ class OraclePolicy:
         
         for action in valid_actions:
             if action < self.env.L * self.env.W:
-                x = action % self.env.L
-                y = action // self.env.L
-                
-                height = self.env.height_map[y, x] if y < self.env.height_map.shape[0] and x < self.env.height_map.shape[1] else 0
+                x, y = self._coords(action)
+                height = self._height_at(x, y)
                 
                 if height < min_height:
                     min_height = height
@@ -127,14 +134,39 @@ class OraclePolicy:
         
         for action in valid_actions:
             if action < self.env.L * self.env.W:
-                x = action % self.env.L
-                y = action // self.env.L
+                x, y = self._coords(action)
                 distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
                 
                 if distance < best_distance:
                     best_distance = distance
                     best_action = action
         
+        return best_action
+
+    def _select_dblf(self, valid_actions):
+        """Select the deepest-bottom-left-front-like valid action.
+
+        DBLF is commonly used as a constructive 3D packing baseline. In this
+        grid-action environment, z is implied by the current height map, so this
+        variant chooses the valid position with the lowest support height first,
+        then the smallest y/front coordinate, then the smallest x/left
+        coordinate.
+        """
+        if len(valid_actions) == 1:
+            return valid_actions[0]
+
+        best_action = valid_actions[0]
+        best_key = None
+
+        for action in valid_actions:
+            if action >= self.env.L * self.env.W:
+                continue
+            x, y = self._coords(action)
+            key = (self._height_at(x, y), y, x)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_action = action
+
         return best_action
 
 

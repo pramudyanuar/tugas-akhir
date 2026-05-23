@@ -2,12 +2,12 @@
 
 PART OF HIERARCHICAL RL:
   - HIGH-LEVEL: HighLevelAgent (this file) -> What strategy?
-  - LOW-LEVEL: PPO + ActorCriticNetwork (agents/ppo.py + models/actor_critic.py) -> Where to place?
+  - LOW-LEVEL: A3C + ActorCriticNetwork (agents/a3c.py + models/actor_critic.py) -> Where to place?
 
 RELATIONSHIP:
   HighLevelAgent selects STRATEGY (orientation, repack, skip):
-    1. Provides strategy to low-level PPO agent
-    2. PPO then selects WHERE to place (position) given that strategy
+    1. Provides strategy to low-level A3C agent
+    2. A3C then selects WHERE to place (position) given that strategy
     3. Together: WHAT strategy + WHERE to place = Complete decision
 
 EXAMPLE DECISION:
@@ -17,7 +17,7 @@ EXAMPLE DECISION:
               HighLevelAgent -> Strategy (e.g., "place vertically rotated")
                         |
                         v
-              PPO Agent -> Position (e.g., "place at (x=10, y=5)")
+              A3C Agent -> Position (e.g., "place at (x=10, y=5)")
                         |
                         v
               Environment -> Execute action & get reward
@@ -43,7 +43,7 @@ class HighLevelAgent(nn.Module):
     RESPONSIBILITIES (What Strategy?):
     1. LBCP clustering: Group items for balanced load distribution
     2. Strategy selection: Decide strategy (orientation, repack, skip)
-    3. Guidance: Provide strategy to low-level PPO agent
+    3. Guidance: Provide strategy to low-level A3C agent
     
     HOW IT WORKS:
     1. Input: Container state (height_map + item dimensions)
@@ -54,12 +54,12 @@ class HighLevelAgent(nn.Module):
     TRAINING:
     - Not directly trained this phase (for future enhancement)
     - Currently uses LBCP heuristic for clustering
-    - Can be jointly trained with PPO for end-to-end learning
+    - Can be jointly trained with A3C for end-to-end learning
     
     INTERACTION WITH LOW-LEVEL:
     train.py._select_hierarchical_action() uses:
       strategy = high_level_agent.select_action()
-      position = ppo_agent.select_action(state, strategy)
+      position = a3c_agent.select_action(state, strategy)
     
     REFERENCE TO OLD APPROACH:
     Deprecated LowLevelAgent (models/low_level_agent.py) tried to do both

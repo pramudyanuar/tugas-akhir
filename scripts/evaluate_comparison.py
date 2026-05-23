@@ -1,12 +1,12 @@
-"""
-Policy Comparison Evaluation Script.
+"""Policy comparison evaluation script.
 
 Compares multiple policies on the same benchmark:
-- PPO (learned policy)
-- HighLevelAgent+PPO (hierarchical)
-- Oracle Load Balance (greedy heuristic)
-- Oracle Height (greedy heuristic - min height)
-- Random (baseline)
+- A3C learned low-level policy
+- Oracle DBLF-like greedy heuristic
+- Oracle load-balance greedy heuristic
+- Oracle height greedy heuristic
+- Oracle center-priority greedy heuristic
+- Random baseline
 """
 
 import argparse
@@ -15,11 +15,11 @@ import os
 import torch
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.core.container_env import ContainerEnv
 from evaluate import compare_policies, evaluate
-from src.learning.agents.ppo import PPO
+from src.learning.agents.a3c import A3C
 from src.learning.models.high_level_agent import HighLevelAgent
 from src.learning.agents.oracle_policy import OraclePolicy, RandomPolicy
 
@@ -30,7 +30,7 @@ def main():
     parser.add_argument('--max-items', type=int, default=20, help='Max items per episode')
     parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
     parser.add_argument('--dataset', type=str, default='random', help='Dataset type: random or cutting_stock')
-    parser.add_argument('--ppo-checkpoint', type=str, default=None, help='Path to PPO checkpoint')
+    parser.add_argument('--a3c-checkpoint', type=str, default=None, help='Path to A3C checkpoint')
     parser.add_argument('--high-level-checkpoint', type=str, default=None, help='Path to HighLevelAgent checkpoint')
     
     args = parser.parse_args()
@@ -45,32 +45,38 @@ def main():
     policies = {}
     
     # Add Oracle policies
-    print("Loading oracle policies...")
+    print("Loading heuristic baseline policies...")
+    policies['oracle_dblf'] = OraclePolicy(env, priority='dblf')
     policies['oracle_load_balance'] = OraclePolicy(env, priority='load_balance')
     policies['oracle_height'] = OraclePolicy(env, priority='height')
     policies['oracle_center'] = OraclePolicy(env, priority='nearest_center')
     policies['random'] = RandomPolicy(env)
     
-    # Add PPO if checkpoint provided
-    if args.ppo_checkpoint and os.path.exists(args.ppo_checkpoint):
-        print(f"Loading PPO from {args.ppo_checkpoint}...")
-        ppo = PPO(
+    # Add A3C if checkpoint provided
+    if args.a3c_checkpoint and os.path.exists(args.a3c_checkpoint):
+        print(f"Loading A3C from {args.a3c_checkpoint}...")
+        a3c = A3C(
             state_size=env.state_size,
             action_size=env.action_size,
+            L=env.L,
+            W=env.W,
             learning_rate=3e-4,
             gamma=0.99,
-            gae_lambda=0.95,
-            clip_ratio=0.2,
             entropy_coef=0.01,
             value_coef=0.5,
             device=args.device
         )
-        checkpoint = torch.load(args.ppo_checkpoint, map_location=args.device)
-        ppo.network.load_state_dict(checkpoint['network'])
-        ppo.network.eval()
-        policies['ppo'] = ppo
+        checkpoint = torch.load(args.a3c_checkpoint, map_location=args.device)
+        if isinstance(checkpoint, dict) and 'network' in checkpoint:
+            a3c.network.load_state_dict(checkpoint['network'])
+        else:
+            a3c.network.load_state_dict(checkpoint)
+        a3c.network.eval()
+        policies['a3c'] = a3c
     
-    # Add HighLevelAgent+PPO if checkpoints provided
+    # Add HighLevelAgent if checkpoint provided. The current comparison script
+    # keeps baselines and the learned low-level policy separate; hierarchical
+    # evaluation is handled by scripts/evaluate.py.
     if args.high_level_checkpoint and os.path.exists(args.high_level_checkpoint):
         print(f"Loading HighLevelAgent from {args.high_level_checkpoint}...")
         high_level = HighLevelAgent(input_dim=env.state_size)
@@ -95,11 +101,15 @@ def main():
         dataset_type=args.dataset
     )
     
-    # Save results to CSV
-    import pandas as pd
-    df = pd.DataFrame(results).T
+    # Save results to CSV without requiring pandas.
     output_file = 'policy_comparison_results.csv'
-    df.to_csv(output_file)
+    import csv
+    metric_names = sorted(next(iter(results.values())).keys()) if results else []
+    with open(output_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['policy'] + metric_names)
+        for policy_name, metrics in results.items():
+            writer.writerow([policy_name] + [metrics[name] for name in metric_names])
     print(f"Results saved to {output_file}")
 
 

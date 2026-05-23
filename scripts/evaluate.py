@@ -701,7 +701,8 @@ def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu',
     Args:
         policies_dict: Dict mapping policy_name -> policy_instance
             e.g., {
-                'ppo': ppo_policy,
+                'a3c': a3c_policy,
+                'oracle_dblf': OraclePolicy(env, priority='dblf'),
                 'oracle_load_balance': OraclePolicy(env, priority='load_balance'),
                 'oracle_height': OraclePolicy(env, priority='height'),
                 'random': RandomPolicy(env)
@@ -714,8 +715,6 @@ def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu',
     Returns:
         dict: Comparison results with metrics for each policy
     """
-    import pandas as pd
-    
     print("\n" + "="*70)
     print("POLICY COMPARISON EVALUATION")
     print("="*70 + "\n")
@@ -746,9 +745,10 @@ def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu',
             while not done:
                 # Select action using policy
                 if hasattr(policy, 'select_action'):
-                    action = policy.select_action(state, action_mask)
+                    selected = policy.select_action(state, action_mask)
+                    action = selected[0] if isinstance(selected, tuple) else selected
                 else:
-                    # For PPO models: convert to tensor and pass through network
+                    # For raw actor-critic models: convert to tensor and pass through network
                     state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
                     mask_tensor = torch.FloatTensor(action_mask).unsqueeze(0).to(device)
                     
@@ -768,11 +768,12 @@ def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu',
                 env.placed_items,
                 env.height_map
             )
-            stability_rate = 100.0 * metrics.compute_stability_rate(
-                env.placed_items,
+            stability_info = metrics.compute_stability_rate(
+                env.height_map.map,
                 env.placed_positions,
-                env.container_height_map
+                env.placed_items
             )
+            stability_rate = 100.0 * stability_info['stability_rate']
             success_rate = 100.0 * len(env.placed_items) / len(env.items)
             
             policy_metrics['utilization'].append(utilization)
@@ -806,8 +807,32 @@ def compare_policies(policies_dict, num_episodes=50, max_items=20, device='cpu',
     print("COMPARISON RESULTS")
     print("="*70 + "\n")
     
-    df = pd.DataFrame(results).T
-    print(df.to_string())
+    metric_names = [
+        'utilization_mean',
+        'utilization_std',
+        'load_balance_mean',
+        'load_balance_std',
+        'stability_rate_mean',
+        'stability_rate_std',
+        'success_rate_mean',
+        'success_rate_std',
+        'total_reward_mean',
+        'total_reward_std',
+    ]
+    header = ["policy"] + metric_names
+    rows = []
+    for policy_name, values in results.items():
+        rows.append([policy_name] + [values[name] for name in metric_names])
+
+    col_widths = [
+        max(len(str(row[i])) for row in ([header] + rows))
+        for i in range(len(header))
+    ]
+    print(" | ".join(str(value).ljust(col_widths[i]) for i, value in enumerate(header)))
+    print("-+-".join("-" * width for width in col_widths))
+    for row in rows:
+        formatted = [row[0]] + [f"{float(value):.4f}" for value in row[1:]]
+        print(" | ".join(str(value).ljust(col_widths[i]) for i, value in enumerate(formatted)))
     
     print("\n" + "="*70 + "\n")
     

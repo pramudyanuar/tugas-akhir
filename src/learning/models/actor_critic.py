@@ -1,15 +1,15 @@
-"""CNN-based Actor-Critic Network for PPO (MODERN LOW-LEVEL).
+"""CNN-based Actor-Critic Network for the A3C low-level policy.
 
 PART OF HIERARCHICAL RL:
   - HIGH-LEVEL: HighLevelAgent (models/high_level_agent.py) -> Strategy selection
-  - LOW-LEVEL: PPO (agents/ppo.py) + ActorCriticNetwork (this file) -> Placement
+  - LOW-LEVEL: A3C (agents/a3c.py) + ActorCriticNetwork (this file) -> Placement
 
 RELATIONSHIP:
-  PPO algorithm uses ActorCriticNetwork to:
+  A3C uses ActorCriticNetwork to:
     1. Process current container state (height_map + item dims)
     2. Output action logits for all valid positions
     3. Output value estimate for state
-    4. Learn via GAE + Clipped objective
+    4. Learn via policy loss + value loss + entropy regularization
 
 LEGACY:
   models/low_level_agent.py contains old implementation (not used anymore)
@@ -21,7 +21,7 @@ import torch.nn as nn
 
 class ActorCriticNetwork(nn.Module):
     """
-    MODERN LOW-LEVEL Network: CNN-based Actor-Critic for PPO.
+    Low-level network: CNN-based Actor-Critic for A3C.
     
     This network is the core of the low-level placement policy.
     It replaces the old LowLevelAgent with a superior CNN architecture.
@@ -32,7 +32,7 @@ class ActorCriticNetwork(nn.Module):
     - Actor head (logits): output untuk each possible container position
     - Critic head (value): scalar value estimate for current state
     
-    Used by: agents/ppo.py (PPO algorithm)
+    Used by: agents/a3c.py (A3C algorithm)
     """
     
     def __init__(self, L=59, W=23, action_size=59*23+1, hidden_size=512):
