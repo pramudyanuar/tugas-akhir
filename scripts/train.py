@@ -746,6 +746,17 @@ class TrainingLoop:
         print(f"Episode Length:      {stats.get('length_mean', 0):.1f} steps")
         print(f"Container Util:      {stats.get('utilization_mean', 0):.2f}%")
         print(f"Success Rate:        {stats.get('success_rate_mean', 0):.1f}%")
+        
+        # Also show current incomplete episode (useful for large-scale packing)
+        if self.total_steps > 0:
+            current_util = self.env.get_utilization() if hasattr(self.env, 'get_utilization') else 0.0
+            current_items = len(self.env.placed_items) if hasattr(self.env, 'placed_items') else 0
+            total_items = len(self.env.items) if hasattr(self.env, 'items') else 0
+            print(f"\nCurrent Incomplete Episode:")
+            print(f"  Accumulated Reward:  {self.env.episode_reward:.4f}")
+            print(f"  Steps Taken:         {self.env.episode_length}")
+            print(f"  Items Placed:        {current_items}/{total_items}")
+            print(f"  Current Util:        {current_util:.2f}%")
 
         rearr_attempts = max(self.rearrange_stats['rearrange_attempts'], 1)
         rearr_success_rate = 100.0 * self.rearrange_stats['rearrange_success'] / rearr_attempts
