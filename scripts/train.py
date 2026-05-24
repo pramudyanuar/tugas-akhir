@@ -1244,6 +1244,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
     high_optimizer = torch.optim.Adam(shared_high_level.parameters(), lr=1e-4)
 
     loops = []
+    per_loop_records = {}
+    epoch_records = []
     for env_idx, env in enumerate(envs):
         loop = TrainingLoop(
             env=env,
@@ -1252,8 +1254,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             device=device,
             seed=seed,
             debug_actions=debug_actions,
-            vis_interval=10**9,
-            vis_dir=vis_dir,
+            vis_interval=vis_interval,
+            vis_dir=str(Path(vis_dir) / f"env_{env_idx}"),
             blf_only=blf_only,
             repack_cooldown=repack_cooldown,
             high_level_agent=shared_high_level,
@@ -1264,6 +1266,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             loop_id=env_idx,
         )
         loops.append(loop)
+        per_loop_records[env_idx] = []
 
     total_steps = num_epochs * n_steps
     steps_done = 0
@@ -1304,6 +1307,56 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                     avg_metric = float(
                         np.mean([s.get(early_stop_metric, 0.0) for s in stats_list])
                     )
+                    for loop in loops:
+                        stats = loop.logger.get_stats()
+                        if not stats:
+                            continue
+                        rearr_attempts = max(loop.rearrange_stats['rearrange_attempts'], 1)
+                        per_loop_records[loop.loop_id].append({
+                            'epoch': epoch_index,
+                            'reward_mean_last100': stats.get('reward_mean', 0.0),
+                            'reward_std_last100': stats.get('reward_std', 0.0),
+                            'length_mean_last100': stats.get('length_mean', 0.0),
+                            'utilization_mean_last100': stats.get('utilization_mean', 0.0),
+                            'success_rate_mean_last100': stats.get('success_rate_mean', 0.0),
+                            'deadlocks': loop.rearrange_stats['deadlocks'],
+                            'rearrange_attempts': loop.rearrange_stats['rearrange_attempts'],
+                            'rearrange_success_rate': loop.rearrange_stats['rearrange_success'] / rearr_attempts,
+                            'rearrange_apply_rate': loop.rearrange_stats['rearrange_applied'] / rearr_attempts,
+                            'avg_rearrange_value': loop.rearrange_stats['rearrange_best_value_sum'] / rearr_attempts,
+                            'avg_unpack_depth': loop.rearrange_stats['rearrange_unpack_depth_sum'] / rearr_attempts,
+                            'mcts_fallback_used': loop.rearrange_stats['mcts_fallback_used'],
+                            'total_steps': loop.total_steps,
+                            'total_episodes': loop.episode_count,
+                        })
+
+                    total_rearr_attempts = sum(l.rearrange_stats['rearrange_attempts'] for l in loops)
+                    total_rearr_attempts = max(total_rearr_attempts, 1)
+                    epoch_records.append({
+                        'epoch': epoch_index,
+                        'reward_mean_last100': float(np.mean([s.get('reward_mean', 0.0) for s in stats_list])),
+                        'reward_std_last100': float(np.mean([s.get('reward_std', 0.0) for s in stats_list])),
+                        'length_mean_last100': float(np.mean([s.get('length_mean', 0.0) for s in stats_list])),
+                        'utilization_mean_last100': float(np.mean([s.get('utilization_mean', 0.0) for s in stats_list])),
+                        'success_rate_mean_last100': float(np.mean([s.get('success_rate_mean', 0.0) for s in stats_list])),
+                        'deadlocks': int(sum(l.rearrange_stats['deadlocks'] for l in loops)),
+                        'rearrange_attempts': int(sum(l.rearrange_stats['rearrange_attempts'] for l in loops)),
+                        'rearrange_success_rate': float(
+                            sum(l.rearrange_stats['rearrange_success'] for l in loops) / total_rearr_attempts
+                        ),
+                        'rearrange_apply_rate': float(
+                            sum(l.rearrange_stats['rearrange_applied'] for l in loops) / total_rearr_attempts
+                        ),
+                        'avg_rearrange_value': float(
+                            sum(l.rearrange_stats['rearrange_best_value_sum'] for l in loops) / total_rearr_attempts
+                        ),
+                        'avg_unpack_depth': float(
+                            sum(l.rearrange_stats['rearrange_unpack_depth_sum'] for l in loops) / total_rearr_attempts
+                        ),
+                        'mcts_fallback_used': int(sum(l.rearrange_stats['mcts_fallback_used'] for l in loops)),
+                        'total_steps': int(steps_done),
+                        'total_episodes': int(sum(l.episode_count for l in loops)),
+                    })
                     if early_stop:
                         if best_metric is None or avg_metric > (best_metric + early_stop_min_delta):
                             best_metric = avg_metric
@@ -1327,6 +1380,28 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                     torch.save(shared_high_level.state_dict(), hl_path)
                     print(f"Checkpoint saved: {ckpt_path}")
                     next_checkpoint += checkpoint_steps
+
+    logs_root = Path('logs/training')
+    logs_root.mkdir(parents=True, exist_ok=True)
+    if epoch_records:
+        summary_path = logs_root / 'batched_training_epoch_metrics.csv'
+        with summary_path.open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(epoch_records[0].keys()))
+            writer.writeheader()
+            writer.writerows(epoch_records)
+        print(f"Batched training metrics CSV saved: {summary_path}")
+
+    for loop_id, records in per_loop_records.items():
+        if not records:
+            continue
+        loop_dir = logs_root / f"batched_env_{loop_id}"
+        loop_dir.mkdir(parents=True, exist_ok=True)
+        loop_csv = loop_dir / 'training_epoch_metrics.csv'
+        with loop_csv.open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(records[0].keys()))
+            writer.writeheader()
+            writer.writerows(records)
+        print(f"Env {loop_id} metrics CSV saved: {loop_csv}")
 
     return a3c
 
