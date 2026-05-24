@@ -14,6 +14,7 @@ import numpy as np
 from scipy.stats import norm
 
 from src.utils.item_utils import get_item_dims, make_item
+from src.core.lbcp import validate_structural_stability, update_feasibility_map
 
 
 class PerfectPackGenerator:
@@ -141,6 +142,9 @@ class PerfectPackGenerator:
         max_layer_height=6,
         num_attempts=3,
         shuffle=False,
+        enforce_stability=False,
+        cog_tolerance=0.15,
+        max_stability_checks=128,
     ):
         """
         Generate layered perfect pack for full 3D utilization with varied heights.
@@ -187,6 +191,9 @@ class PerfectPackGenerator:
                 return_positions=True,
                 fixed_height=layer_h,
                 z_offset=z_offset,
+                enforce_stability=enforce_stability,
+                cog_tolerance=cog_tolerance,
+                max_stability_checks=max_stability_checks,
             )
             items.extend(layer_items)
             positions.extend(layer_positions)
@@ -197,7 +204,15 @@ class PerfectPackGenerator:
 
         return items, positions
 
-    def _generate_single_attempt(self, return_positions=False, fixed_height=None, z_offset=0):
+    def _generate_single_attempt(
+        self,
+        return_positions=False,
+        fixed_height=None,
+        z_offset=0,
+        enforce_stability=False,
+        cog_tolerance=0.15,
+        max_stability_checks=128,
+    ):
         """
         Generate single attempt untuk perfect packing.
 
@@ -210,6 +225,9 @@ class PerfectPackGenerator:
         
         # Initialize bin dengan semua zero heights (empty bin)
         bin_map = np.zeros((self.W, self.H), dtype=np.int32)
+        height_map = np.zeros((self.W, self.H), dtype=np.int32)
+        feasibility_map = np.ones((self.W, self.H), dtype=bool) if enforce_stability else None
+        height_has_support = False
         
         # Track max width dan height untuk dimension constraints
         maxw = 0
@@ -249,17 +267,53 @@ class PerfectPackGenerator:
                     
                     if max_score >= 0:
                         # Ada feasible position
-                        placed = True
-                        best_y, best_x = np.unravel_index(np.argmax(R), R.shape)
-                        
-                        # Place item di position terbaik
-                        bin_map[best_x:best_x+wo, best_y:best_y+ho] = 1
-                        items.append(make_item(wo, ho, item_h, self._sample_stacking()))
-                        if return_positions:
-                            positions.append((best_x, best_y, int(z_offset)))
-                        area += wo * ho
-                        maxw = max(maxw, wo)
-                        maxh = max(maxh, ho)
+                        candidate_indices = np.argwhere(R >= 0)
+                        if candidate_indices.size == 0:
+                            candidate_indices = np.array([]).reshape(0, 2)
+                        else:
+                            scores = R[candidate_indices[:, 0], candidate_indices[:, 1]]
+                            order = np.argsort(scores)[::-1]
+                            candidate_indices = candidate_indices[order]
+
+                        checks = 0
+                        for best_y, best_x in candidate_indices:
+                            support_polygon = None
+                            if enforce_stability and height_has_support:
+                                base_height = int(np.max(height_map[best_x:best_x+wo, best_y:best_y+ho]))
+                                obj_payload = {
+                                    'x': int(best_x),
+                                    'y': int(best_y),
+                                    'w': int(wo),
+                                    'd': int(ho),
+                                }
+                                valid, support_polygon, _ = validate_structural_stability(
+                                    obj_payload,
+                                    None,
+                                    height_map,
+                                    feasibility_map,
+                                    float(cog_tolerance),
+                                )
+                                if not valid:
+                                    checks += 1
+                                    if max_stability_checks is not None and checks >= int(max_stability_checks):
+                                        break
+                                    continue
+
+                            # Place item di position terbaik
+                            placed = True
+                            bin_map[best_x:best_x+wo, best_y:best_y+ho] = 1
+                            base_height = int(np.max(height_map[best_x:best_x+wo, best_y:best_y+ho]))
+                            height_map[best_x:best_x+wo, best_y:best_y+ho] = base_height + item_h
+                            height_has_support = height_has_support or (base_height + item_h > 0)
+                            if enforce_stability and support_polygon is not None:
+                                feasibility_map = update_feasibility_map(feasibility_map, support_polygon)
+                            items.append(make_item(wo, ho, item_h, self._sample_stacking()))
+                            if return_positions:
+                                positions.append((best_x, best_y, int(z_offset)))
+                            area += wo * ho
+                            maxw = max(maxw, wo)
+                            maxh = max(maxh, ho)
+                            break
                 
                 attempts += 1
             

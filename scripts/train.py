@@ -58,17 +58,22 @@ class TrainingLogger:
         self.episode_utilizations.append(utilization)
         self.episode_success_rates.append(success_rate)
     
-    def get_stats(self):
-        """Get training statistics."""
+    def get_stats(self, last_n=100):
+        """Get training statistics over the last N episodes."""
         if not self.episode_rewards:
             return {}
-        
+
+        window = min(int(last_n), len(self.episode_rewards))
+        if window <= 0:
+            return {}
+
         return {
-            'reward_mean': np.mean(self.episode_rewards[-100:]),
-            'reward_std': np.std(self.episode_rewards[-100:]),
-            'length_mean': np.mean(self.episode_lengths[-100:]),
-            'utilization_mean': np.mean(self.episode_utilizations[-100:]),
-            'success_rate_mean': np.mean(self.episode_success_rates[-100:]),
+            'reward_mean': np.mean(self.episode_rewards[-window:]),
+            'reward_std': np.std(self.episode_rewards[-window:]),
+            'length_mean': np.mean(self.episode_lengths[-window:]),
+            'utilization_mean': np.mean(self.episode_utilizations[-window:]),
+            'success_rate_mean': np.mean(self.episode_success_rates[-window:]),
+            'window': window,
         }
     
     def print_episode_summary(self, episode, reward, length, utilization, items_placed, total_items):
@@ -158,6 +163,7 @@ class TrainingLoop:
         
         self.total_steps = 0
         self.episode_count = 0
+        self.epoch_count = 0
         self.current_state = None
         self.current_action_mask = None
         self.blf_only = bool(blf_only)
@@ -717,8 +723,9 @@ class TrainingLoop:
             num_epochs (int): Jumlah A3C update epochs (unused)
             log_frequency (int): Frequency untuk print summary
         """
+        self.epoch_count += 1
         print(f"\n{'='*70}")
-        print(f"Training Epoch {self.episode_count // log_frequency + 1}")
+        print(f"Training Epoch {self.epoch_count}")
         print(f"{'='*70}\n")
         
         epoch_start = time.perf_counter()
@@ -748,9 +755,10 @@ class TrainingLoop:
                 return 0.0
         
         # Print statistics
-        stats = self.logger.get_stats()
+        stats = self.logger.get_stats(last_n=100)
+        stats_window = int(stats.get('window', 0))
         print(f"{'='*70}")
-        print("Training Statistics (last 100 episodes):")
+        print(f"Training Statistics (last {stats_window} episodes):")
         print(f"{'='*70}")
         print(f"Episode Reward:      {stats.get('reward_mean', 0):.4f} ± {stats.get('reward_std', 0):.4f}")
         print(f"Episode Length:      {stats.get('length_mean', 0):.1f} steps")

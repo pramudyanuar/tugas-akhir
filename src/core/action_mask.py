@@ -318,8 +318,8 @@ class ActionMask:
         combined_mask = masking_result['combined_mask']
         can_skip = masking_result['can_skip']
         
-        # Flatten mask
-        action_mask = combined_mask.flatten()
+        # Flatten mask in column-major order so index = x + y*L
+        action_mask = combined_mask.flatten(order='F')
         
         # Append skip action
         if include_skip:

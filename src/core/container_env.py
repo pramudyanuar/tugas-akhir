@@ -63,6 +63,7 @@ class ContainerEnv:
         self.feasibility_map = np.ones((self.L, self.W), dtype=bool)
         self.top_item_map = np.full((self.L, self.W), -1, dtype=np.int32)
         self.debug_mask_stats = False
+        self.debug_invalid_placement = False
         if dataset_type == 'cutting_stock':
             self.dataset_generator = CuttingStockGenerator(
                 seed=seed,
@@ -137,6 +138,9 @@ class ContainerEnv:
                 container_height=self.H,
                 min_layer_height=self.layered_min_height,
                 max_layer_height=self.layered_max_height,
+                enforce_stability=True,
+                cog_tolerance=self.cog_tolerance,
+                max_stability_checks=128,
             )
             self.items = items
             self.ground_truth_positions = positions
@@ -318,6 +322,13 @@ class ContainerEnv:
         
         # Check valid position
         if not self._is_valid_position(x, y, item_l, item_w, item_h, item_stacking):
+            if self.debug_invalid_placement:
+                reason = self._get_invalid_reason(x, y, item_l, item_w, item_h, item_stacking)
+                print(
+                    f"Invalid placement | item_idx={self.current_index} "
+                    f"pos=({x},{y}) dims=({item_l},{item_w},{item_h}) reason={reason}",
+                    flush=True,
+                )
             # Invalid placement, skip to next item
             reward = self.invalid_penalty  # Penalty untuk invalid placement
             self.current_index += 1
@@ -331,7 +342,9 @@ class ContainerEnv:
             return (next_state, next_mask), reward, done, info
 
         support_polygon = None
-        if self.use_structural_validation:
+        # Skip structural validation in step() if using fast_stability_mask
+        # (since action_mask already validated using fast path)
+        if self.use_structural_validation and not self.fast_stability_mask:
             obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
             valid, support_polygon, _ = validate_structural_stability(
                 obj_payload,
@@ -432,7 +445,7 @@ class ContainerEnv:
 
         # Check stability with LBCP
         try:
-            if self.use_structural_validation:
+            if self.use_structural_validation and not self.fast_stability_mask:
                 obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
                 valid, _, _ = validate_structural_stability(
                     obj_payload,
@@ -444,12 +457,58 @@ class ContainerEnv:
                 if not valid:
                     return False
 
-            if not is_stable(self.height_map.map, x, y, item_l, item_w, item_h, self.H):
+            # Use strict_mode=False untuk consistent dengan action masking (fast_stability_mask)
+            # yang hanya check height overflow, bukan full CoG validation
+            if not is_stable(self.height_map.map, x, y, item_l, item_w, item_h, self.H, strict_mode=False):
                 return False
         except Exception:
             return False
         
         return True
+
+    def _get_invalid_reason(self, x, y, item_l, item_w, item_h, item_stacking=None):
+        """Return a short reason string for invalid placements (debug only)."""
+        if x + item_l > self.L or y + item_w > self.W:
+            return 'out_of_bounds'
+
+        base_height = self.height_map.max_height_in_region(x, y, item_l, item_w)
+        if base_height + item_h > self.H:
+            return 'overflow'
+
+        if not self._stacking_allows_placement(x, y, item_l, item_w, item_stacking):
+            return 'stacking_policy'
+
+        if self.use_structural_validation and not self.fast_stability_mask:
+            try:
+                obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
+                valid, _, _ = validate_structural_stability(
+                    obj_payload,
+                    None,
+                    self.height_map.map,
+                    self.feasibility_map,
+                    self.cog_tolerance,
+                )
+                if not valid:
+                    return 'structural_validation'
+            except Exception:
+                return 'structural_exception'
+
+        try:
+            if not is_stable(
+                self.height_map.map,
+                x,
+                y,
+                item_l,
+                item_w,
+                item_h,
+                self.H,
+                strict_mode=False,
+            ):
+                return 'stability'
+        except Exception:
+            return 'stability_exception'
+
+        return 'unknown'
 
     def _rotate_item_dims(self, item_l, item_w, item_h, orientation):
         """Rotate item dimensions based on orientation index."""

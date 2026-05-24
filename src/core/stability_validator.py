@@ -13,8 +13,13 @@ try:
 except ImportError:
     HAS_NUMBA = False
     def njit(*args, **kwargs):
+        # Support both @njit and @njit(...) usage when numba is unavailable.
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+
         def decorator(f):
             return f
+
         return decorator
 
 
