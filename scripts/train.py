@@ -1403,6 +1403,13 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             writer.writerows(records)
         print(f"Env {loop_id} metrics CSV saved: {loop_csv}")
 
+    final_ckpt = logs_root / 'batched_final.pt'
+    a3c.save_checkpoint(str(final_ckpt))
+    final_hl_ckpt = logs_root / 'batched_high_level_final.pt'
+    torch.save(shared_high_level.state_dict(), final_hl_ckpt)
+    print(f"Batched final checkpoint saved: {final_ckpt}")
+    print(f"Batched final high-level checkpoint saved: {final_hl_ckpt}")
+
     return a3c
 
 
