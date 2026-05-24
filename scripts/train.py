@@ -158,6 +158,8 @@ class TrainingLoop:
         
         self.total_steps = 0
         self.episode_count = 0
+        self.current_state = None
+        self.current_action_mask = None
         self.blf_only = bool(blf_only)
         self.deadlock_streak = 0
         self.repack_cooldown = max(1, int(repack_cooldown))
@@ -575,12 +577,17 @@ class TrainingLoop:
         }
         strategy_buffer = []  # Store strategy info for HighLevelAgent update
         
-        # Reset environment
-        reset_start = time.perf_counter()
-        state, action_mask = self.env.reset(seed=self.seed)
-        timing['episode_reset_s'] += time.perf_counter() - reset_start
-        if self.seed is not None:
-            self.seed += 1  # Increment seed untuk variety
+        # Continue the active episode across short rollouts. Reset only when this
+        # loop has no active state yet or after an episode has finished.
+        if self.current_state is None or self.current_action_mask is None:
+            reset_start = time.perf_counter()
+            state, action_mask = self.env.reset(seed=self.seed)
+            timing['episode_reset_s'] += time.perf_counter() - reset_start
+            if self.seed is not None:
+                self.seed += 1  # Increment seed untuk variety
+        else:
+            state = self.current_state
+            action_mask = self.current_action_mask
 
         print(
             f"Collect rollout | loop={self.loop_id if self.loop_id is not None else 'main'} | "
@@ -688,6 +695,9 @@ class TrainingLoop:
                 timing['episode_reset_s'] += time.perf_counter() - reset_start
                 if self.seed is not None:
                     self.seed += 1
+
+        self.current_state = state
+        self.current_action_mask = action_mask
         
         # Get next value untuk GAE bootstrap
         if not done:
@@ -822,6 +832,7 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
         perfect_pack_size_bias=pp_size_bias,
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
+        max_episode_length=n_steps * 2,
     )
     env.debug_mask_stats = bool(debug_mask)
     state, action_mask = env.reset()
@@ -1101,6 +1112,7 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         perfect_pack_size_bias=pp_size_bias,
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
+        max_episode_length=rollout_steps*2,
     )
     state_size = env.state_size
     action_size = env.action_size
@@ -1200,6 +1212,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             perfect_pack_size_bias=pp_size_bias,
             perfect_pack_mean_ratio=pp_mean_ratio,
             fast_stability_mask=fast_stability_mask,
+            max_episode_length=rollout_steps*2,
         )
         env.debug_mask_stats = bool(debug_mask)
         envs.append(env)
@@ -1270,6 +1283,12 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
 
             if steps_done >= next_epoch_step:
                 epoch_index += 1
+                print(
+                    f"\nBatched epoch {epoch_index}/{num_epochs} complete | "
+                    f"steps_done={steps_done}/{total_steps} | "
+                    f"episodes={[l.episode_count for l in loops]}\n",
+                    flush=True,
+                )
                 next_epoch_step += n_steps
 
                 stats_list = [l.logger.get_stats() for l in loops if l.logger.get_stats()]
