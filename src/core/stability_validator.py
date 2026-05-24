@@ -41,7 +41,6 @@ class StabilityValidator:
             StabilityValidator._validate_cache.clear()
     
     @staticmethod
-    @njit
     def compute_support_cells(height_map, x, y, l, w, base_height):
         """
         Support cell extraction: mengekstrak semua sel dari region yang bertumpu
@@ -56,15 +55,18 @@ class StabilityValidator:
         Returns:
             numpy array: koordinat [x, y] dari setiap support cell
         """
-        region = height_map[x:x+l, y:y+w]
-        coords = []
+        region = height_map[x:x + l, y:y + w]
+        if region.size == 0:
+            return np.array([]).reshape(0, 2)
 
-        for i in range(l):
-            for j in range(w):
-                if region[i, j] == base_height:
-                    coords.append([x+i, y+j])
+        local_coords = np.argwhere(region == base_height)
+        if local_coords.size == 0:
+            return np.array([]).reshape(0, 2)
 
-        return np.array(coords) if coords else np.array([]).reshape(0, 2)
+        local_coords = local_coords.astype(np.int32, copy=False)
+        local_coords[:, 0] += int(x)
+        local_coords[:, 1] += int(y)
+        return local_coords
 
     @staticmethod
     def compute_convex_hull(support_cells):
