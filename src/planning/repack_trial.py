@@ -246,7 +246,7 @@ class RepackTrial:
         for idx, (item, (x, y, base_height)) in enumerate(zip(remaining_items, remaining_positions)):
             item_l, item_w, item_h = get_item_dims(item)
             support_polygon = None
-            if getattr(self.env, 'use_structural_validation', False):
+            if getattr(self.env, 'use_structural_validation', False) and not getattr(self.env, 'fast_stability_mask', False):
                 obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
                 valid, support_polygon, _ = validate_structural_stability(
                     obj_payload,

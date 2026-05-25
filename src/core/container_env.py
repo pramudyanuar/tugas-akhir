@@ -612,7 +612,7 @@ class ContainerEnv:
 
         for idx, (item, (x, y, base_height)) in enumerate(zip(self.placed_items, new_positions)):
             item_l, item_w, item_h = get_item_dims(item)
-            if self.use_structural_validation:
+            if self.use_structural_validation and not self.fast_stability_mask:
                 obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
                 valid, support_polygon, _ = validate_structural_stability(
                     obj_payload,
@@ -635,7 +635,7 @@ class ContainerEnv:
             self.height_map.update_region(x, y, item_l, item_w, new_height)
             self.top_item_map[x:x + item_l, y:y + item_w] = idx
 
-            if self.use_structural_validation:
+            if self.use_structural_validation and not self.fast_stability_mask:
                 self.feasibility_map = update_feasibility_map(
                     self.feasibility_map,
                     support_polygon

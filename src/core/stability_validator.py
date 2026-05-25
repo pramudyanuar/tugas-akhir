@@ -234,8 +234,8 @@ class StabilityValidator:
         if region.size == 0:
             return False, np.array([]).reshape(0, 2), None
 
-        # Algorithm 1 line 10: support height is min height in the region.
-        support_height = np.min(region)
+        # Algorithm 1 line 10: support height is max height in the region.
+        support_height = np.max(region)
 
         # Compute small fingerprints for caching (cheap checksum)
         try:
