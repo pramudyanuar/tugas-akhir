@@ -1423,7 +1423,8 @@ if __name__ == "__main__":
     parser.add_argument('--n_steps', type=int, default=2048, help='Steps per epoch')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
-    parser.add_argument('--dataset', type=str, default='perfect_pack_layered', help='Dataset: perfect_pack_layered only')
+    parser.add_argument('--dataset', type=str, default='perfect_pack',
+                        help='Dataset: perfect_pack or perfect_pack_layered')
     parser.add_argument('--layered-min-height', type=int, default=2, help='Min layer height for perfect_pack_layered')
     parser.add_argument('--layered-max-height', type=int, default=6, help='Max layer height for perfect_pack_layered')
     parser.add_argument('--pp-sigma', type=float, default=4, help='Perfect pack Gaussian sigma')
@@ -1470,8 +1471,8 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("3D BIN PACKING WITH A3C TRAINING")
     print("="*70)
-    if args.dataset != 'perfect_pack_layered':
-        raise ValueError("Training hanya mendukung dataset 'perfect_pack_layered'.")
+    if args.dataset not in {'perfect_pack', 'perfect_pack_layered'}:
+        raise ValueError("Training hanya mendukung dataset 'perfect_pack' atau 'perfect_pack_layered'.")
 
     print(
         f"Config: epochs={args.num_epochs}, steps={args.n_steps}, "
