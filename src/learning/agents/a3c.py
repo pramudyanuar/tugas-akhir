@@ -228,7 +228,15 @@ class A3C:
         nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
         self.optimizer.step()
 
+        loss_info = {
+            'policy_loss': float(policy_loss.detach().cpu().item()),
+            'value_loss': float(value_loss.detach().cpu().item()),
+            'entropy': float(entropy.detach().cpu().item()),
+            'total_loss': float(total_loss.detach().cpu().item()),
+        }
+
         self.memory.clear()
+        return loss_info
 
     def save_checkpoint(self, filepath):
         """Save model checkpoint."""

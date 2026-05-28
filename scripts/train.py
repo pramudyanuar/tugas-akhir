@@ -47,6 +47,11 @@ class TrainingLogger:
         self.episode_lengths = []
         self.episode_utilizations = []
         self.episode_success_rates = []
+        self.a3c_policy_losses = []
+        self.a3c_value_losses = []
+        self.a3c_entropies = []
+        self.a3c_total_losses = []
+        self.high_level_policy_losses = []
         
     def log_episode(self, episode_reward, episode_length, utilization, 
                    items_placed, total_items):
@@ -57,6 +62,16 @@ class TrainingLogger:
         self.episode_lengths.append(episode_length)
         self.episode_utilizations.append(utilization)
         self.episode_success_rates.append(success_rate)
+
+    def log_update(self, a3c_loss=None, high_level_loss=None):
+        """Log loss values from update steps."""
+        if a3c_loss:
+            self.a3c_policy_losses.append(float(a3c_loss.get('policy_loss', 0.0)))
+            self.a3c_value_losses.append(float(a3c_loss.get('value_loss', 0.0)))
+            self.a3c_entropies.append(float(a3c_loss.get('entropy', 0.0)))
+            self.a3c_total_losses.append(float(a3c_loss.get('total_loss', 0.0)))
+        if high_level_loss:
+            self.high_level_policy_losses.append(float(high_level_loss.get('policy_loss', 0.0)))
     
     def get_stats(self, last_n=100):
         """Get training statistics over the last N episodes."""
@@ -67,7 +82,7 @@ class TrainingLogger:
         if window <= 0:
             return {}
 
-        return {
+        stats = {
             'reward_mean': np.mean(self.episode_rewards[-window:]),
             'reward_std': np.std(self.episode_rewards[-window:]),
             'length_mean': np.mean(self.episode_lengths[-window:]),
@@ -75,6 +90,16 @@ class TrainingLogger:
             'success_rate_mean': np.mean(self.episode_success_rates[-window:]),
             'window': window,
         }
+        if self.a3c_total_losses:
+            stats.update({
+                'a3c_policy_loss_mean': float(np.mean(self.a3c_policy_losses)),
+                'a3c_value_loss_mean': float(np.mean(self.a3c_value_losses)),
+                'a3c_entropy_mean': float(np.mean(self.a3c_entropies)),
+                'a3c_total_loss_mean': float(np.mean(self.a3c_total_losses)),
+            })
+        if self.high_level_policy_losses:
+            stats['high_level_policy_loss_mean'] = float(np.mean(self.high_level_policy_losses))
+        return stats
     
     def print_episode_summary(self, episode, reward, length, utilization, items_placed, total_items):
         """Print episode summary."""
@@ -468,7 +493,7 @@ class TrainingLoop:
             num_epochs (int): Number of update passes
         """
         if not strategy_buffer:
-            return
+            return None
 
         states = torch.FloatTensor(
             np.stack([entry['state'] for entry in strategy_buffer])
@@ -485,6 +510,7 @@ class TrainingLoop:
         else:
             advantages = rewards
 
+        losses = []
         for _ in range(int(num_epochs)):
             high_output = self.high_level_agent(states)
             logits = high_output['strategy_logits']
@@ -497,6 +523,11 @@ class TrainingLoop:
             policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.high_level_agent.parameters(), 0.5)
             self.high_level_optimizer.step()
+            losses.append(float(policy_loss.detach().cpu().item()))
+
+        if not losses:
+            return None
+        return {'policy_loss': float(np.mean(losses))}
     
     def _save_visualization(self, episode_num, suffix=""):
         """
@@ -735,13 +766,15 @@ class TrainingLoop:
         
         # Update HighLevelAgent
         print(f"\nUpdating HighLevelAgent... ", end='', flush=True)
-        self._update_high_level_agent(strategy_buffer)
+        high_level_loss = self._update_high_level_agent(strategy_buffer)
         print("Done!")
         
         # Update A3C network
         print(f"Updating A3C network... ", end='', flush=True)
-        self.a3c.update(next_value=next_value)
+        a3c_loss = self.a3c.update(next_value=next_value)
         print("Done!\n")
+
+        self.logger.log_update(a3c_loss=a3c_loss, high_level_loss=high_level_loss)
 
         epoch_elapsed = time.perf_counter() - epoch_start
         steps_per_sec = self.n_steps / epoch_elapsed if epoch_elapsed > 0 else 0.0
@@ -764,6 +797,14 @@ class TrainingLoop:
         print(f"Episode Length:      {stats.get('length_mean', 0):.1f} steps")
         print(f"Container Util:      {stats.get('utilization_mean', 0):.2f}%")
         print(f"Success Rate:        {stats.get('success_rate_mean', 0):.1f}%")
+        if stats.get('a3c_total_loss_mean') is not None:
+            print("\nA3C Loss (avg over updates):")
+            print(f"  Policy Loss:       {stats.get('a3c_policy_loss_mean', 0):.6f}")
+            print(f"  Value Loss:        {stats.get('a3c_value_loss_mean', 0):.6f}")
+            print(f"  Entropy:           {stats.get('a3c_entropy_mean', 0):.6f}")
+            print(f"  Total Loss:        {stats.get('a3c_total_loss_mean', 0):.6f}")
+        if stats.get('high_level_policy_loss_mean') is not None:
+            print(f"High-Level Policy Loss (avg): {stats.get('high_level_policy_loss_mean', 0):.6f}")
         
         # Also show current incomplete episode (useful for large-scale packing)
         if self.total_steps > 0:
@@ -955,6 +996,11 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
                 'length_mean_last100': stats.get('length_mean', 0.0),
                 'utilization_mean_last100': stats.get('utilization_mean', 0.0),
                 'success_rate_mean_last100': stats.get('success_rate_mean', 0.0),
+                'a3c_policy_loss_mean': stats.get('a3c_policy_loss_mean', 0.0),
+                'a3c_value_loss_mean': stats.get('a3c_value_loss_mean', 0.0),
+                'a3c_entropy_mean': stats.get('a3c_entropy_mean', 0.0),
+                'a3c_total_loss_mean': stats.get('a3c_total_loss_mean', 0.0),
+                'high_level_policy_loss_mean': stats.get('high_level_policy_loss_mean', 0.0),
                 'deadlocks': training_loop.rearrange_stats['deadlocks'],
                 'rearrange_attempts': training_loop.rearrange_stats['rearrange_attempts'],
                 'rearrange_success_rate': training_loop.rearrange_stats['rearrange_success'] / rearr_attempts,
