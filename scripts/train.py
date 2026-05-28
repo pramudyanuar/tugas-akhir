@@ -1329,8 +1329,9 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             if steps_done >= total_steps:
                 break
             episode_info, next_value, strategy_buffer, _ = loop.collect_steps(rollout_steps)
-            loop._update_high_level_agent(strategy_buffer)
-            a3c.update(next_value=next_value)
+            high_level_loss = loop._update_high_level_agent(strategy_buffer)
+            a3c_loss = a3c.update(next_value=next_value)
+            loop.logger.log_update(a3c_loss=a3c_loss, high_level_loss=high_level_loss)
             steps_done += rollout_steps
             print(
                 f"Global progress | steps_done={steps_done}/{total_steps} | "
@@ -1353,6 +1354,13 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                     avg_metric = float(
                         np.mean([s.get(early_stop_metric, 0.0) for s in stats_list])
                     )
+                    avg_a3c_total_loss = float(
+                        np.mean([s.get('a3c_total_loss_mean', 0.0) for s in stats_list])
+                    )
+                    print(
+                        f"Batched loss avg | a3c_total={avg_a3c_total_loss:.6f}",
+                        flush=True,
+                    )
                     for loop in loops:
                         stats = loop.logger.get_stats()
                         if not stats:
@@ -1365,6 +1373,11 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                             'length_mean_last100': stats.get('length_mean', 0.0),
                             'utilization_mean_last100': stats.get('utilization_mean', 0.0),
                             'success_rate_mean_last100': stats.get('success_rate_mean', 0.0),
+                            'a3c_policy_loss_mean': stats.get('a3c_policy_loss_mean', 0.0),
+                            'a3c_value_loss_mean': stats.get('a3c_value_loss_mean', 0.0),
+                            'a3c_entropy_mean': stats.get('a3c_entropy_mean', 0.0),
+                            'a3c_total_loss_mean': stats.get('a3c_total_loss_mean', 0.0),
+                            'high_level_policy_loss_mean': stats.get('high_level_policy_loss_mean', 0.0),
                             'deadlocks': loop.rearrange_stats['deadlocks'],
                             'rearrange_attempts': loop.rearrange_stats['rearrange_attempts'],
                             'rearrange_success_rate': loop.rearrange_stats['rearrange_success'] / rearr_attempts,
@@ -1385,6 +1398,13 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                         'length_mean_last100': float(np.mean([s.get('length_mean', 0.0) for s in stats_list])),
                         'utilization_mean_last100': float(np.mean([s.get('utilization_mean', 0.0) for s in stats_list])),
                         'success_rate_mean_last100': float(np.mean([s.get('success_rate_mean', 0.0) for s in stats_list])),
+                        'a3c_policy_loss_mean': float(np.mean([s.get('a3c_policy_loss_mean', 0.0) for s in stats_list])),
+                        'a3c_value_loss_mean': float(np.mean([s.get('a3c_value_loss_mean', 0.0) for s in stats_list])),
+                        'a3c_entropy_mean': float(np.mean([s.get('a3c_entropy_mean', 0.0) for s in stats_list])),
+                        'a3c_total_loss_mean': float(np.mean([s.get('a3c_total_loss_mean', 0.0) for s in stats_list])),
+                        'high_level_policy_loss_mean': float(
+                            np.mean([s.get('high_level_policy_loss_mean', 0.0) for s in stats_list])
+                        ),
                         'deadlocks': int(sum(l.rearrange_stats['deadlocks'] for l in loops)),
                         'rearrange_attempts': int(sum(l.rearrange_stats['rearrange_attempts'] for l in loops)),
                         'rearrange_success_rate': float(
