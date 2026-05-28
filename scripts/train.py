@@ -1354,11 +1354,28 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                     avg_metric = float(
                         np.mean([s.get(early_stop_metric, 0.0) for s in stats_list])
                     )
-                    avg_a3c_total_loss = float(
+                    avg_a3c_policy = float(
+                        np.mean([s.get('a3c_policy_loss_mean', 0.0) for s in stats_list])
+                    )
+                    avg_a3c_value = float(
+                        np.mean([s.get('a3c_value_loss_mean', 0.0) for s in stats_list])
+                    )
+                    avg_a3c_entropy = float(
+                        np.mean([s.get('a3c_entropy_mean', 0.0) for s in stats_list])
+                    )
+                    avg_a3c_total = float(
                         np.mean([s.get('a3c_total_loss_mean', 0.0) for s in stats_list])
                     )
+                    avg_high_level = float(
+                        np.mean([s.get('high_level_policy_loss_mean', 0.0) for s in stats_list])
+                    )
                     print(
-                        f"Batched loss avg | a3c_total={avg_a3c_total_loss:.6f}",
+                        "Batched loss avg | "
+                        f"a3c_policy={avg_a3c_policy:.6f} | "
+                        f"a3c_value={avg_a3c_value:.6f} | "
+                        f"a3c_entropy={avg_a3c_entropy:.6f} | "
+                        f"a3c_total={avg_a3c_total:.6f} | "
+                        f"high_level_policy={avg_high_level:.6f}",
                         flush=True,
                     )
                     for loop in loops:
