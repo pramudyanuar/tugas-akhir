@@ -92,7 +92,7 @@ class ContainerVisualizer:
         plt.subplots_adjust(left=0.1, right=0.95, top=0.92, bottom=0.1, wspace=0.3)
         return fig
     
-    def visualize_packing_3d(self, placed_items, placed_positions, title="3D Container Packing"):
+    def visualize_packing_3d(self, placed_items, placed_positions, title="3D Container Packing", view=None):
         """
         Visualize packing dalam 3D dengan aspect ratio realistic.
         
@@ -100,6 +100,7 @@ class ContainerVisualizer:
             placed_items: List of (length, width, height)
             placed_positions: List of (x, y, z)
             title: Plot title
+            view: Optional (elev, azim) tuple for camera angle
         """
         # Calculate figure size based on container aspect ratio
         # Normalize by max dimension to preserve proportions
@@ -167,7 +168,10 @@ class ContainerVisualizer:
         ax.set_zlabel(f'Height (H={self.H})', fontsize=11, fontweight='bold')
         
         # Set viewing angle untuk perspektif yang optimal
-        ax.view_init(elev=25, azim=45)
+        if view is None:
+            ax.view_init(elev=25, azim=45)
+        else:
+            ax.view_init(elev=float(view[0]), azim=float(view[1]))
         
         ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
         

@@ -625,15 +625,25 @@ class TrainingLoop:
             fig_2d.savefig(str(filename_2d), dpi=100, bbox_inches='tight')
             plt.close(fig_2d)
             
-            # Save 3D visualization
-            fig_3d = self.visualizer.visualize_packing_3d(
-                self.env.placed_items,
-                self.env.placed_positions,
-                title=title
-            )
-            filename_3d = self.vis_dir / f"episode_{episode_num:04d}_3d{suffix}.png"
-            fig_3d.savefig(str(filename_3d), dpi=100, bbox_inches='tight')
-            plt.close(fig_3d)
+            # Save 3D visualization from multiple angles
+            view_angles = [
+                (25, 45),
+                (35, 135),
+                (20, 225),
+                (15, 315),
+            ]
+            for elev, azim in view_angles:
+                fig_3d = self.visualizer.visualize_packing_3d(
+                    self.env.placed_items,
+                    self.env.placed_positions,
+                    title=f"{title} | elev={elev}, azim={azim}",
+                    view=(elev, azim),
+                )
+                filename_3d = self.vis_dir / (
+                    f"episode_{episode_num:04d}_3d_e{int(elev)}_a{int(azim)}{suffix}.png"
+                )
+                fig_3d.savefig(str(filename_3d), dpi=100, bbox_inches='tight')
+                plt.close(fig_3d)
             
             # Save cross-sections
             fig_cross = self.visualizer.visualize_cross_sections(
