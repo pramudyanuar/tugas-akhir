@@ -26,6 +26,7 @@ from src.planning.high_level_search import HighLevelSearcher
 from visualization import ContainerVisualizer
 from src.utils.metrics import Metrics
 from src.utils.item_utils import get_item_dims
+from src.utils.logger import create_logger
 
 
 class TrainingLogger:
@@ -33,7 +34,7 @@ class TrainingLogger:
     Logger untuk training metrics.
     """
     
-    def __init__(self, log_dir='logs/training'):
+    def __init__(self, log_dir='logs/training', tb_log_dir='logs/tensorboard', tb_experiment=None):
         """
         Initialize logger.
         
@@ -52,9 +53,16 @@ class TrainingLogger:
         self.a3c_entropies = []
         self.a3c_total_losses = []
         self.high_level_policy_losses = []
+        self.tb_logger = None
+        if tb_experiment:
+            self.tb_logger = create_logger(log_dir=tb_log_dir, experiment_name=tb_experiment)
+
+    def _log_scalar(self, tag, value, step):
+        if self.tb_logger is not None:
+            self.tb_logger.log_scalar(tag, value, step)
         
-    def log_episode(self, episode_reward, episode_length, utilization, 
-                   items_placed, total_items):
+    def log_episode(self, episode_reward, episode_length, utilization,
+                    items_placed, total_items, step=None):
         """Log episode metrics."""
         success_rate = (items_placed / total_items * 100) if total_items > 0 else 0.0
         
@@ -63,7 +71,16 @@ class TrainingLogger:
         self.episode_utilizations.append(utilization)
         self.episode_success_rates.append(success_rate)
 
-    def log_update(self, a3c_loss=None, high_level_loss=None):
+        if self.tb_logger is not None:
+            log_step = int(step) if step is not None else len(self.episode_rewards)
+            self._log_scalar('episode/reward', episode_reward, log_step)
+            self._log_scalar('episode/length', episode_length, log_step)
+            self._log_scalar('episode/utilization', utilization, log_step)
+            self._log_scalar('episode/success_rate', success_rate, log_step)
+            self._log_scalar('episode/items_placed', items_placed, log_step)
+            self._log_scalar('episode/total_items', total_items, log_step)
+
+    def log_update(self, a3c_loss=None, high_level_loss=None, step=None):
         """Log loss values from update steps."""
         if a3c_loss:
             self.a3c_policy_losses.append(float(a3c_loss.get('policy_loss', 0.0)))
@@ -72,6 +89,59 @@ class TrainingLogger:
             self.a3c_total_losses.append(float(a3c_loss.get('total_loss', 0.0)))
         if high_level_loss:
             self.high_level_policy_losses.append(float(high_level_loss.get('policy_loss', 0.0)))
+
+        if self.tb_logger is not None:
+            log_step = int(step) if step is not None else len(self.a3c_total_losses)
+            if a3c_loss:
+                self._log_scalar('loss/a3c_policy', a3c_loss.get('policy_loss', 0.0), log_step)
+                self._log_scalar('loss/a3c_value', a3c_loss.get('value_loss', 0.0), log_step)
+                self._log_scalar('loss/a3c_entropy', a3c_loss.get('entropy', 0.0), log_step)
+                self._log_scalar('loss/a3c_total', a3c_loss.get('total_loss', 0.0), log_step)
+            if high_level_loss:
+                self._log_scalar('loss/high_level_policy', high_level_loss.get('policy_loss', 0.0), log_step)
+
+    def log_epoch_summary(self, stats, rearrange_stats, step):
+        """Log epoch-level summary metrics to TensorBoard."""
+        if self.tb_logger is None:
+            return
+        log_step = int(step)
+        self._log_scalar('epoch/reward_mean', stats.get('reward_mean', 0.0), log_step)
+        self._log_scalar('epoch/reward_std', stats.get('reward_std', 0.0), log_step)
+        self._log_scalar('epoch/length_mean', stats.get('length_mean', 0.0), log_step)
+        self._log_scalar('epoch/utilization_mean', stats.get('utilization_mean', 0.0), log_step)
+        self._log_scalar('epoch/success_rate_mean', stats.get('success_rate_mean', 0.0), log_step)
+        self._log_scalar('epoch/a3c_policy_loss_mean', stats.get('a3c_policy_loss_mean', 0.0), log_step)
+        self._log_scalar('epoch/a3c_value_loss_mean', stats.get('a3c_value_loss_mean', 0.0), log_step)
+        self._log_scalar('epoch/a3c_entropy_mean', stats.get('a3c_entropy_mean', 0.0), log_step)
+        self._log_scalar('epoch/a3c_total_loss_mean', stats.get('a3c_total_loss_mean', 0.0), log_step)
+        self._log_scalar('epoch/high_level_policy_loss_mean', stats.get('high_level_policy_loss_mean', 0.0), log_step)
+
+        rearr_attempts = max(int(rearrange_stats.get('rearrange_attempts', 0)), 1)
+        self._log_scalar('epoch/deadlocks', rearrange_stats.get('deadlocks', 0), log_step)
+        self._log_scalar('epoch/rearrange_attempts', rearrange_stats.get('rearrange_attempts', 0), log_step)
+        self._log_scalar(
+            'epoch/rearrange_success_rate',
+            float(rearrange_stats.get('rearrange_success', 0)) / rearr_attempts,
+            log_step,
+        )
+        self._log_scalar(
+            'epoch/rearrange_apply_rate',
+            float(rearrange_stats.get('rearrange_applied', 0)) / rearr_attempts,
+            log_step,
+        )
+        self._log_scalar(
+            'epoch/avg_rearrange_value',
+            float(rearrange_stats.get('rearrange_best_value_sum', 0.0)) / rearr_attempts,
+            log_step,
+        )
+        self._log_scalar(
+            'epoch/avg_unpack_depth',
+            float(rearrange_stats.get('rearrange_unpack_depth_sum', 0.0)) / rearr_attempts,
+            log_step,
+        )
+        self._log_scalar('epoch/mcts_active_used', rearrange_stats.get('mcts_active_used', 0), log_step)
+        self._log_scalar('epoch/mcts_fallback_used', rearrange_stats.get('mcts_fallback_used', 0), log_step)
+        self.tb_logger.flush()
     
     def get_stats(self, last_n=100):
         """Get training statistics over the last N episodes."""
@@ -130,7 +200,8 @@ class TrainingLoop:
                  blf_only=False, repack_cooldown=1,
                  high_level_agent=None, high_level_optimizer=None,
                  candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
-                 progress_interval=25, loop_id=None):
+                 progress_interval=25, loop_id=None,
+                 tb_log_dir='logs/tensorboard', tb_experiment=None):
         """
         Initialize training loop.
         
@@ -173,7 +244,7 @@ class TrainingLoop:
             self.candidate_top_k = None if candidate_top_k <= 0 else candidate_top_k
         self.use_mcts_prob = float(use_mcts_prob)
         
-        self.logger = TrainingLogger()
+        self.logger = TrainingLogger(tb_log_dir=tb_log_dir, tb_experiment=tb_experiment)
         self.progress_interval = max(1, int(progress_interval))
         self.rearrange_stats = {
             'deadlocks': 0,
@@ -711,8 +782,14 @@ class TrainingLoop:
                 episode_info['placed_items'].append(items_placed)
                 episode_info['total_items'].append(total_items)
                 
-                self.logger.log_episode(episode_reward, episode_length, 
-                                       utilization, items_placed, total_items)
+                self.logger.log_episode(
+                    episode_reward,
+                    episode_length,
+                    utilization,
+                    items_placed,
+                    total_items,
+                    step=self.total_steps,
+                )
                 self.logger.print_episode_summary(self.episode_count, episode_reward, 
                                                  episode_length, utilization, 
                                                  items_placed, total_items)
@@ -774,7 +851,11 @@ class TrainingLoop:
         a3c_loss = self.a3c.update(next_value=next_value)
         print("Done!\n")
 
-        self.logger.log_update(a3c_loss=a3c_loss, high_level_loss=high_level_loss)
+        self.logger.log_update(
+            a3c_loss=a3c_loss,
+            high_level_loss=high_level_loss,
+            step=self.total_steps,
+        )
 
         epoch_elapsed = time.perf_counter() - epoch_start
         steps_per_sec = self.n_steps / epoch_elapsed if epoch_elapsed > 0 else 0.0
@@ -842,6 +923,8 @@ class TrainingLoop:
         print(f"  Visualization:     {timing['visualization_s']:.2f}s ({pct(timing['visualization_s']):.1f}%)")
         print(f"{'='*70}\n")
 
+        self.logger.log_epoch_summary(stats, self.rearrange_stats, step=self.epoch_count)
+
 
 def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='random',
           debug_mask=False, debug_actions=False, vis_interval=50, vis_dir='outputs/visualizations',
@@ -850,7 +933,8 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
           pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
           checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
           early_stop=True, early_stop_metric='utilization_mean',
-          early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
+          early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
+          tb_log_dir='logs/tensorboard', tb_experiment='train_single'):
     """
     Main training function.
     
@@ -954,6 +1038,8 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
         candidate_top_k=candidate_top_k,
         mcts_budget=mcts_budget,
         use_mcts_prob=use_mcts_prob,
+        tb_log_dir=tb_log_dir,
+        tb_experiment=tb_experiment,
     )
     
     # Training loop
@@ -1109,6 +1195,8 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
         candidate_top_k=config['candidate_top_k'],
         mcts_budget=config['mcts_budget'],
         use_mcts_prob=config['use_mcts_prob'],
+        tb_log_dir=config['tb_log_dir'],
+        tb_experiment=f"{config['tb_experiment']}_worker_{worker_id}",
     )
 
     while True:
@@ -1118,8 +1206,9 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
 
         episode_info, next_value, strategy_buffer, _ = loop.collect_steps(config['rollout_steps'])
 
-        loop._update_high_level_agent(strategy_buffer)
-        a3c.update(next_value=next_value)
+        high_level_loss = loop._update_high_level_agent(strategy_buffer)
+        a3c_loss = a3c.update(next_value=next_value)
+        loop.logger.log_update(a3c_loss=a3c_loss, high_level_loss=high_level_loss)
 
         with global_step.get_lock():
             global_step.value += config['rollout_steps']
@@ -1148,7 +1237,8 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
                 pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
                 candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
                 early_stop=True, early_stop_metric='utilization_mean',
-                early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
+                early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
+                tb_log_dir='logs/tensorboard', tb_experiment='train_async'):
     if device != 'cpu':
         print("Async A3C uses CPU workers; switching device to cpu.")
         device = 'cpu'
@@ -1210,6 +1300,8 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         'candidate_top_k': candidate_top_k,
         'mcts_budget': mcts_budget,
         'use_mcts_prob': use_mcts_prob,
+        'tb_log_dir': tb_log_dir,
+        'tb_experiment': tb_experiment,
     }
 
     ctx = mp.get_context('spawn')
@@ -1251,7 +1343,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                   pp_sigma=4, pp_size_bias=3.0, pp_mean_ratio=0.25,
                   checkpoint_steps=0, candidate_top_k=128, mcts_budget=20, use_mcts_prob=0.0,
                   early_stop=True, early_stop_metric='utilization_mean',
-                  early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10):
+                  early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
+                  tb_log_dir='logs/tensorboard', tb_experiment='train_batched'):
     envs = []
     for idx in range(int(batched_envs)):
         env = ContainerEnv(
@@ -1292,6 +1385,7 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
     loops = []
     per_loop_records = {}
     epoch_records = []
+    summary_logger = TrainingLogger(tb_log_dir=tb_log_dir, tb_experiment=f"{tb_experiment}_summary")
     for env_idx, env in enumerate(envs):
         loop = TrainingLoop(
             env=env,
@@ -1310,6 +1404,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             mcts_budget=mcts_budget,
             use_mcts_prob=use_mcts_prob,
             loop_id=env_idx,
+            tb_log_dir=tb_log_dir,
+            tb_experiment=f"{tb_experiment}_env_{env_idx}",
         )
         loops.append(loop)
         per_loop_records[env_idx] = []
@@ -1331,7 +1427,11 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             episode_info, next_value, strategy_buffer, _ = loop.collect_steps(rollout_steps)
             high_level_loss = loop._update_high_level_agent(strategy_buffer)
             a3c_loss = a3c.update(next_value=next_value)
-            loop.logger.log_update(a3c_loss=a3c_loss, high_level_loss=high_level_loss)
+            loop.logger.log_update(
+                a3c_loss=a3c_loss,
+                high_level_loss=high_level_loss,
+                step=loop.total_steps,
+            )
             steps_done += rollout_steps
             print(
                 f"Global progress | steps_done={steps_done}/{total_steps} | "
@@ -1378,10 +1478,20 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                         f"high_level_policy={avg_high_level:.6f}",
                         flush=True,
                     )
+                    total_deadlocks = 0
+                    total_rearrange_attempts = 0
+                    total_rearrange_success = 0
+                    total_rearrange_applied = 0
+                    total_rearrange_value = 0.0
+                    total_unpack_depth = 0.0
+                    total_mcts_active = 0
+                    total_mcts_fallback = 0
+
                     for loop in loops:
                         stats = loop.logger.get_stats()
                         if not stats:
                             continue
+                        loop.logger.log_epoch_summary(stats, loop.rearrange_stats, step=epoch_index)
                         rearr_attempts = max(loop.rearrange_stats['rearrange_attempts'], 1)
                         per_loop_records[loop.loop_id].append({
                             'epoch': epoch_index,
@@ -1406,8 +1516,16 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                             'total_episodes': loop.episode_count,
                         })
 
-                    total_rearr_attempts = sum(l.rearrange_stats['rearrange_attempts'] for l in loops)
-                    total_rearr_attempts = max(total_rearr_attempts, 1)
+                        total_deadlocks += int(loop.rearrange_stats['deadlocks'])
+                        total_rearrange_attempts += int(loop.rearrange_stats['rearrange_attempts'])
+                        total_rearrange_success += int(loop.rearrange_stats['rearrange_success'])
+                        total_rearrange_applied += int(loop.rearrange_stats['rearrange_applied'])
+                        total_rearrange_value += float(loop.rearrange_stats['rearrange_best_value_sum'])
+                        total_unpack_depth += float(loop.rearrange_stats['rearrange_unpack_depth_sum'])
+                        total_mcts_active += int(loop.rearrange_stats['mcts_active_used'])
+                        total_mcts_fallback += int(loop.rearrange_stats['mcts_fallback_used'])
+
+                    total_rearr_attempts = max(total_rearrange_attempts, 1)
                     epoch_records.append({
                         'epoch': epoch_index,
                         'reward_mean_last100': float(np.mean([s.get('reward_mean', 0.0) for s in stats_list])),
@@ -1422,24 +1540,58 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                         'high_level_policy_loss_mean': float(
                             np.mean([s.get('high_level_policy_loss_mean', 0.0) for s in stats_list])
                         ),
-                        'deadlocks': int(sum(l.rearrange_stats['deadlocks'] for l in loops)),
-                        'rearrange_attempts': int(sum(l.rearrange_stats['rearrange_attempts'] for l in loops)),
+                        'deadlocks': int(total_deadlocks),
+                        'rearrange_attempts': int(total_rearrange_attempts),
                         'rearrange_success_rate': float(
-                            sum(l.rearrange_stats['rearrange_success'] for l in loops) / total_rearr_attempts
+                            total_rearrange_success / total_rearr_attempts
                         ),
                         'rearrange_apply_rate': float(
-                            sum(l.rearrange_stats['rearrange_applied'] for l in loops) / total_rearr_attempts
+                            total_rearrange_applied / total_rearr_attempts
                         ),
                         'avg_rearrange_value': float(
-                            sum(l.rearrange_stats['rearrange_best_value_sum'] for l in loops) / total_rearr_attempts
+                            total_rearrange_value / total_rearr_attempts
                         ),
                         'avg_unpack_depth': float(
-                            sum(l.rearrange_stats['rearrange_unpack_depth_sum'] for l in loops) / total_rearr_attempts
+                            total_unpack_depth / total_rearr_attempts
                         ),
-                        'mcts_fallback_used': int(sum(l.rearrange_stats['mcts_fallback_used'] for l in loops)),
+                        'mcts_fallback_used': int(total_mcts_fallback),
                         'total_steps': int(steps_done),
                         'total_episodes': int(sum(l.episode_count for l in loops)),
                     })
+                    summary_stats = {
+                        'reward_mean': float(np.mean([s.get('reward_mean', 0.0) for s in stats_list])),
+                        'reward_std': float(np.mean([s.get('reward_std', 0.0) for s in stats_list])),
+                        'length_mean': float(np.mean([s.get('length_mean', 0.0) for s in stats_list])),
+                        'utilization_mean': float(np.mean([s.get('utilization_mean', 0.0) for s in stats_list])),
+                        'success_rate_mean': float(np.mean([s.get('success_rate_mean', 0.0) for s in stats_list])),
+                        'a3c_policy_loss_mean': float(np.mean([s.get('a3c_policy_loss_mean', 0.0) for s in stats_list])),
+                        'a3c_value_loss_mean': float(np.mean([s.get('a3c_value_loss_mean', 0.0) for s in stats_list])),
+                        'a3c_entropy_mean': float(np.mean([s.get('a3c_entropy_mean', 0.0) for s in stats_list])),
+                        'a3c_total_loss_mean': float(np.mean([s.get('a3c_total_loss_mean', 0.0) for s in stats_list])),
+                        'high_level_policy_loss_mean': float(
+                            np.mean([s.get('high_level_policy_loss_mean', 0.0) for s in stats_list])
+                        ),
+                    }
+                    summary_rearrange = {
+                        'deadlocks': total_deadlocks,
+                        'rearrange_attempts': total_rearrange_attempts,
+                        'rearrange_success': total_rearrange_success,
+                        'rearrange_applied': total_rearrange_applied,
+                        'rearrange_best_value_sum': total_rearrange_value,
+                        'rearrange_unpack_depth_sum': total_unpack_depth,
+                        'mcts_active_used': total_mcts_active,
+                        'mcts_fallback_used': total_mcts_fallback,
+                    }
+                    summary_logger.log_epoch_summary(summary_stats, summary_rearrange, step=epoch_index)
+
+                    print(
+                        f"Batched stats | deadlocks={total_deadlocks} | "
+                        f"rearrange_attempts={total_rearrange_attempts} | "
+                        f"rearrange_success_rate={total_rearrange_success / total_rearr_attempts:.3f} | "
+                        f"rearrange_apply_rate={total_rearrange_applied / total_rearr_attempts:.3f} | "
+                        f"mcts_active={total_mcts_active} | mcts_fallback={total_mcts_fallback}",
+                        flush=True,
+                    )
                     if early_stop:
                         if best_metric is None or avg_metric > (best_metric + early_stop_min_delta):
                             best_metric = avg_metric
