@@ -360,7 +360,10 @@ class TrainingLoop:
             if self.blf_only:
                 valid_actions = np.where(np.asarray(effective_mask[:-1]) > 0)[0]
                 if len(valid_actions) > 0:
-                    action = int(valid_actions.min())
+                    # Urutkan berdasarkan x (panjang/depth) terlebih dahulu, baru y (lebar 0-24).
+                    # a % L adalah x, a // L adalah y.
+                    sorted_actions = sorted(valid_actions, key=lambda a: (a % self.env.L, a // self.env.L))
+                    action = int(sorted_actions[0])
                 else:
                     action = self.env.L * self.env.W
                 log_prob, value = self._compute_logprob_value_for_action(
@@ -1149,6 +1152,8 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
             writer.writeheader()
             writer.writerows(epoch_records)
         print(f"Training metrics CSV saved: {csv_path}")
+        # Generate training progression plots
+        generate_training_plots(csv_path)
     
     return training_loop, a3c
 
@@ -1635,6 +1640,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             writer.writeheader()
             writer.writerows(epoch_records)
         print(f"Batched training metrics CSV saved: {summary_path}")
+        # Generate summary plots
+        generate_training_plots(summary_path)
 
     for loop_id, records in per_loop_records.items():
         if not records:
@@ -1647,6 +1654,8 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             writer.writeheader()
             writer.writerows(records)
         print(f"Env {loop_id} metrics CSV saved: {loop_csv}")
+        # Generate env-specific plots
+        generate_training_plots(loop_csv)
 
     final_ckpt = logs_root / 'batched_final.pt'
     a3c.save_checkpoint(str(final_ckpt))
@@ -1656,6 +1665,140 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
     print(f"Batched final high-level checkpoint saved: {final_hl_ckpt}")
 
     return a3c
+
+
+def generate_training_plots(csv_path, output_dir=None):
+    """
+    Generate beautiful training plots from a metrics CSV file.
+    """
+    import csv
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        print(f"⚠️ CSV file not found: {csv_path}. Skipping plot generation.")
+        return
+        
+    if output_dir is None:
+        output_dir = csv_path.parent
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    epochs = []
+    rewards = []
+    utilizations = []
+    success_rates = []
+    policy_losses = []
+    value_losses = []
+    entropies = []
+    total_losses = []
+    deadlocks = []
+    rearrange_success_rates = []
+    
+    try:
+        with csv_path.open('r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                epochs.append(int(row.get('epoch', len(epochs))))
+                rewards.append(float(row.get('reward_mean_last100', row.get('reward_mean', 0.0))))
+                utilizations.append(float(row.get('utilization_mean_last100', row.get('utilization_mean', 0.0))))
+                success_rates.append(float(row.get('success_rate_mean_last100', row.get('success_rate_mean', 0.0))))
+                policy_losses.append(float(row.get('a3c_policy_loss_mean', 0.0)))
+                value_losses.append(float(row.get('a3c_value_loss_mean', 0.0)))
+                entropies.append(float(row.get('a3c_entropy_mean', 0.0)))
+                total_losses.append(float(row.get('a3c_total_loss_mean', 0.0)))
+                deadlocks.append(int(row.get('deadlocks', 0)))
+                rearrange_success_rates.append(float(row.get('rearrange_success_rate', 0.0)) * 100)
+    except Exception as e:
+        print(f"⚠️ Error reading CSV for plotting: {e}")
+        return
+        
+    if not epochs:
+        print("⚠️ No epoch records found in CSV. Skipping plot generation.")
+        return
+
+    plt.style.use('default')
+    
+    # Plot 1: Utilization & Success Rate
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    color = '#1f77b4'
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Utilization (%)', color=color)
+    line1 = ax1.plot(epochs, utilizations, color=color, linewidth=2, label='Utilization')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylim(0, 100)
+    
+    ax2 = ax1.twinx()
+    color = '#2ca02c'
+    ax2.set_ylabel('Success Rate (%)', color=color)
+    line2 = ax2.plot(epochs, success_rates, color=color, linewidth=2, linestyle='--', label='Success Rate')
+    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.set_ylim(0, 100)
+    
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='upper left')
+    
+    plt.title('Packing Performance Progression (Utilization vs Success Rate)', fontsize=14, fontweight='bold', pad=15)
+    fig.tight_layout()
+    plt.savefig(output_dir / 'training_utilization_success.png', dpi=150)
+    plt.close()
+    
+    # Plot 2: Rewards
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, rewards, color='#d62728', linewidth=2, label='Mean Reward')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Reward')
+    plt.title('Training Reward Progression', fontsize=14, fontweight='bold', pad=15)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / 'training_rewards.png', dpi=150)
+    plt.close()
+    
+    # Plot 3: A3C Losses & Entropy
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    axs[0, 0].plot(epochs, policy_losses, color='#9467bd', linewidth=1.5)
+    axs[0, 0].set_title('A3C Policy Loss')
+    axs[0, 0].set_xlabel('Epoch')
+    
+    axs[0, 1].plot(epochs, value_losses, color='#8c564b', linewidth=1.5)
+    axs[0, 1].set_title('A3C Value Loss')
+    axs[0, 1].set_xlabel('Epoch')
+    
+    axs[1, 0].plot(epochs, entropies, color='#e377c2', linewidth=1.5)
+    axs[1, 0].set_title('Policy Entropy')
+    axs[1, 0].set_xlabel('Epoch')
+    
+    axs[1, 1].plot(epochs, total_losses, color='#7f7f7f', linewidth=1.5)
+    axs[1, 1].set_title('A3C Total Loss')
+    axs[1, 1].set_xlabel('Epoch')
+    
+    plt.suptitle('A3C Network Convergence Metrics', fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'training_losses.png', dpi=150)
+    plt.close()
+    
+    # Plot 4: MCTS Rearrangement Metrics
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    axs[0].plot(epochs, deadlocks, color='#ff7f0e', linewidth=2, label='Deadlocks')
+    axs[0].set_title('Total Deadlocks per Epoch')
+    axs[0].set_xlabel('Epoch')
+    axs[0].set_ylabel('Count')
+    
+    axs[1].plot(epochs, rearrange_success_rates, color='#17becf', linewidth=2, label='Success %')
+    axs[1].set_title('MCTS Rearrangement Success Rate')
+    axs[1].set_xlabel('Epoch')
+    axs[1].set_ylabel('Success Rate (%)')
+    axs[1].set_ylim(0, 100)
+    
+    plt.suptitle('MCTS Planning & Rearrangement Performance', fontsize=15, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'training_mcts_performance.png', dpi=150)
+    plt.close()
+    
+    print(f"📊 Training plots successfully generated and saved to: {output_dir}")
 
 
 if __name__ == "__main__":

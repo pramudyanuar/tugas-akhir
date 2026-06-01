@@ -100,7 +100,9 @@ class CandidateGenerator:
         if zone_priority == 'front_to_back':
             return -y
         if zone_priority == 'back_to_front':
-            return y
+            # Pintu di x = L, dinding belakang di x = 0.
+            # Prioritaskan x kecil (belakang) terlebih dahulu, baru isi y (lebar 0-24).
+            return -x * 100 - y
 
         # Default: center priority
         dist = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
