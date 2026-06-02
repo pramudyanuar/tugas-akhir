@@ -1726,14 +1726,14 @@ def generate_training_plots(csv_path, output_dir=None):
     color = '#1f77b4'
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Utilization (%)', color=color)
-    line1 = ax1.plot(epochs, utilizations, color=color, linewidth=2, label='Utilization')
+    line1 = ax1.plot(epochs, utilizations, color=color, linewidth=2, marker='o', label='Utilization')
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.set_ylim(0, 100)
     
     ax2 = ax1.twinx()
     color = '#2ca02c'
     ax2.set_ylabel('Success Rate (%)', color=color)
-    line2 = ax2.plot(epochs, success_rates, color=color, linewidth=2, linestyle='--', label='Success Rate')
+    line2 = ax2.plot(epochs, success_rates, color=color, linewidth=2, linestyle='--', marker='s', label='Success Rate')
     ax2.tick_params(axis='y', labelcolor=color)
     ax2.set_ylim(0, 100)
     
@@ -1748,7 +1748,7 @@ def generate_training_plots(csv_path, output_dir=None):
     
     # Plot 2: Rewards
     plt.figure(figsize=(10, 5))
-    plt.plot(epochs, rewards, color='#d62728', linewidth=2, label='Mean Reward')
+    plt.plot(epochs, rewards, color='#d62728', linewidth=2, marker='o', label='Mean Reward')
     plt.xlabel('Epoch')
     plt.ylabel('Mean Reward')
     plt.title('Training Reward Progression', fontsize=14, fontweight='bold', pad=15)
@@ -1759,19 +1759,19 @@ def generate_training_plots(csv_path, output_dir=None):
     
     # Plot 3: A3C Losses & Entropy
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    axs[0, 0].plot(epochs, policy_losses, color='#9467bd', linewidth=1.5)
+    axs[0, 0].plot(epochs, policy_losses, color='#9467bd', linewidth=1.5, marker='o')
     axs[0, 0].set_title('A3C Policy Loss')
     axs[0, 0].set_xlabel('Epoch')
     
-    axs[0, 1].plot(epochs, value_losses, color='#8c564b', linewidth=1.5)
+    axs[0, 1].plot(epochs, value_losses, color='#8c564b', linewidth=1.5, marker='o')
     axs[0, 1].set_title('A3C Value Loss')
     axs[0, 1].set_xlabel('Epoch')
     
-    axs[1, 0].plot(epochs, entropies, color='#e377c2', linewidth=1.5)
+    axs[1, 0].plot(epochs, entropies, color='#e377c2', linewidth=1.5, marker='o')
     axs[1, 0].set_title('Policy Entropy')
     axs[1, 0].set_xlabel('Epoch')
     
-    axs[1, 1].plot(epochs, total_losses, color='#7f7f7f', linewidth=1.5)
+    axs[1, 1].plot(epochs, total_losses, color='#7f7f7f', linewidth=1.5, marker='o')
     axs[1, 1].set_title('A3C Total Loss')
     axs[1, 1].set_xlabel('Epoch')
     
@@ -1782,12 +1782,12 @@ def generate_training_plots(csv_path, output_dir=None):
     
     # Plot 4: MCTS Rearrangement Metrics
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    axs[0].plot(epochs, deadlocks, color='#ff7f0e', linewidth=2, label='Deadlocks')
+    axs[0].plot(epochs, deadlocks, color='#ff7f0e', linewidth=2, marker='o', label='Deadlocks')
     axs[0].set_title('Total Deadlocks per Epoch')
     axs[0].set_xlabel('Epoch')
     axs[0].set_ylabel('Count')
     
-    axs[1].plot(epochs, rearrange_success_rates, color='#17becf', linewidth=2, label='Success %')
+    axs[1].plot(epochs, rearrange_success_rates, color='#17becf', linewidth=2, marker='o', label='Success %')
     axs[1].set_title('MCTS Rearrangement Success Rate')
     axs[1].set_xlabel('Epoch')
     axs[1].set_ylabel('Success Rate (%)')
