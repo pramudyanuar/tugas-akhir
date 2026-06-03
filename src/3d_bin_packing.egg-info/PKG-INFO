@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: 3d-bin-packing
+Version: 0.1.0
+Summary: 3D Bin Packing with A3C Training
+Requires-Python: >=3.9
+Requires-Dist: torch
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: tqdm
+Requires-Dist: tensorboard

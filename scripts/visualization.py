@@ -265,7 +265,7 @@ class ContainerVisualizer:
         
         # 1. Item distribution by size
         ax = axes[0, 0]
-        volumes = [l*w*h for l, w, h in placed_items]
+        volumes = [get_item_dims(item)[0] * get_item_dims(item)[1] * get_item_dims(item)[2] for item in placed_items]
         ax.bar(range(len(volumes)), volumes, color='skyblue', edgecolor='black')
         ax.set_xlabel('Item Index')
         ax.set_ylabel('Volume')
@@ -362,7 +362,7 @@ class ContainerVisualizer:
         
         for pos, item in zip(env.placed_positions, env.placed_items):
             x, y, z = pos
-            l, w, h = item
+            l, w, h = get_item_dims(item)
             center_x = x + l / 2.0
             center_y = y + w / 2.0
             weight = l * w * h

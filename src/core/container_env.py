@@ -342,17 +342,8 @@ class ContainerEnv:
             return (next_state, next_mask), reward, done, info
 
         support_polygon = None
-        # Skip structural validation in step() if using fast_stability_mask
-        # (since action_mask already validated using fast path)
-        if self.use_structural_validation and not self.fast_stability_mask:
-            obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
-            valid, support_polygon, _ = validate_structural_stability(
-                obj_payload,
-                None,
-                self.height_map.map,
-                self.feasibility_map,
-                self.cog_tolerance,
-            )
+        if self.use_structural_validation:
+            valid, support_polygon = self._validate_stability(x, y, item_l, item_w, item_h)
             if not valid:
                 reward = self.invalid_penalty
                 self.current_index += 1
@@ -419,6 +410,35 @@ class ContainerEnv:
         
         return (next_state, next_mask), reward, done, info
     
+    def _validate_stability(self, x, y, item_l, item_w, item_h):
+        """
+        Validate position stability.
+        Uses fast 60% area support check if fast_stability_mask is True,
+        otherwise uses strict LBCP validation (convex hull & CoG).
+        """
+        if not self.use_structural_validation:
+            return True, None
+            
+        if self.fast_stability_mask:
+            # Fast path check on height map
+            hm = self.height_map.map
+            window = hm[x:x+item_l, y:y+item_w]
+            max_height = np.max(window)
+            support_count = np.sum(window == max_height)
+            valid = support_count >= (item_l * item_w * 0.6)
+            return valid, None
+        else:
+            # Strict validation
+            obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
+            valid, support_polygon, _ = validate_structural_stability(
+                obj_payload,
+                None,
+                self.height_map.map,
+                self.feasibility_map,
+                self.cog_tolerance,
+            )
+            return valid, support_polygon
+
     def _is_valid_position(self, x, y, item_l, item_w, item_h, item_stacking=None):
         """
         Check if position is valid (boundary + overflow + stability).
@@ -443,23 +463,10 @@ class ContainerEnv:
         if not self._stacking_allows_placement(x, y, item_l, item_w, item_stacking):
             return False
 
-        # Check stability with LBCP
+        # Check stability
         try:
-            if self.use_structural_validation and not self.fast_stability_mask:
-                obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
-                valid, _, _ = validate_structural_stability(
-                    obj_payload,
-                    None,
-                    self.height_map.map,
-                    self.feasibility_map,
-                    self.cog_tolerance,
-                )
-                if not valid:
-                    return False
-
-            # Use strict_mode=False untuk consistent dengan action masking (fast_stability_mask)
-            # yang hanya check height overflow, bukan full CoG validation
-            if not is_stable(self.height_map.map, x, y, item_l, item_w, item_h, self.H, strict_mode=False):
+            valid, _ = self._validate_stability(x, y, item_l, item_w, item_h)
+            if not valid:
                 return False
         except Exception:
             return False
@@ -478,32 +485,9 @@ class ContainerEnv:
         if not self._stacking_allows_placement(x, y, item_l, item_w, item_stacking):
             return 'stacking_policy'
 
-        if self.use_structural_validation and not self.fast_stability_mask:
-            try:
-                obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
-                valid, _, _ = validate_structural_stability(
-                    obj_payload,
-                    None,
-                    self.height_map.map,
-                    self.feasibility_map,
-                    self.cog_tolerance,
-                )
-                if not valid:
-                    return 'structural_validation'
-            except Exception:
-                return 'structural_exception'
-
         try:
-            if not is_stable(
-                self.height_map.map,
-                x,
-                y,
-                item_l,
-                item_w,
-                item_h,
-                self.H,
-                strict_mode=False,
-            ):
+            valid, _ = self._validate_stability(x, y, item_l, item_w, item_h)
+            if not valid:
                 return 'stability'
         except Exception:
             return 'stability_exception'
@@ -612,15 +596,8 @@ class ContainerEnv:
 
         for idx, (item, (x, y, base_height)) in enumerate(zip(self.placed_items, new_positions)):
             item_l, item_w, item_h = get_item_dims(item)
-            if self.use_structural_validation and not self.fast_stability_mask:
-                obj_payload = {'x': x, 'y': y, 'w': item_l, 'd': item_w}
-                valid, support_polygon, _ = validate_structural_stability(
-                    obj_payload,
-                    None,
-                    self.height_map.map,
-                    self.feasibility_map,
-                    self.cog_tolerance,
-                )
+            if self.use_structural_validation:
+                valid, support_polygon = self._validate_stability(x, y, item_l, item_w, item_h)
                 if not valid:
                     return {
                         'success': False,
@@ -635,7 +612,7 @@ class ContainerEnv:
             self.height_map.update_region(x, y, item_l, item_w, new_height)
             self.top_item_map[x:x + item_l, y:y + item_w] = idx
 
-            if self.use_structural_validation and not self.fast_stability_mask:
+            if self.use_structural_validation and support_polygon is not None:
                 self.feasibility_map = update_feasibility_map(
                     self.feasibility_map,
                     support_polygon
@@ -697,5 +674,3 @@ class ContainerEnv:
         print(f"Utilization: {self.get_utilization():.2f}%")
         print(f"Max Height: {self.get_max_height()}/{self.H}")
         print(f"Episode Reward: {self.episode_reward:.2f}")
-
-    print("=" * 70)

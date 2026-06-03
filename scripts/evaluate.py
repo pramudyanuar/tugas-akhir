@@ -36,7 +36,7 @@ class EvaluationMetrics:
     5. Center of Gravity: Tracking penyimpangan CoG dari ideal center
     """
     
-    def __init__(self, container_dims=(59, 23, 23)):
+    def __init__(self, container_dims=(60, 24, 26)):
         """
         Initialize evaluation metrics.
         
@@ -275,7 +275,7 @@ class EvaluationMetrics:
             # High-level decision
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
             high_output = model_high(state_tensor)
-            strategy = model_high.select_strategy(high_output['strategy_logits'])
+            strategy, _ = model_high.select_strategy(high_output['strategy_logits'], sample=False)
 
             macro_decision = model_high.decode_macro_decision(strategy)
             orientation = macro_decision.get('orientation', 0)
@@ -296,6 +296,7 @@ class EvaluationMetrics:
                 action = self._select_low_level_action(
                     env,
                     model_low,
+                    policy_state,
                     policy_action_mask,
                     candidate_actions
                 )
@@ -435,21 +436,14 @@ class EvaluationMetrics:
             'avg_unpack_depth': avg_unpack_depth,
         }
 
-    def _select_low_level_action(self, env, model_low, action_mask, candidate_actions):
+    def _select_low_level_action(self, env, model_low, state, action_mask, candidate_actions):
         """
         Select low-level action from candidate set using masked policy sampling.
         """
-        height_map_tensor = torch.FloatTensor(env.height_map.map).unsqueeze(0).unsqueeze(0)
-        item = env.items[env.current_index] if env.current_index < len(env.items) else make_item(1, 1, 1)
-        item_l, item_w, item_h = get_item_dims(item)
-        item_dim = torch.FloatTensor([
-            item_l / env.L,
-            item_w / env.W,
-            item_h / env.H,
-        ]).unsqueeze(0)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
 
         with torch.no_grad():
-            logits = model_low(height_map_tensor, item_dim)
+            logits, _ = model_low(state_tensor)
 
         env_mask = torch.BoolTensor(np.asarray(action_mask) > 0).unsqueeze(0)
         candidate_mask = torch.zeros_like(env_mask)
@@ -621,15 +615,15 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
     """
     # Create models if not provided
     if model_high is None:
-        model_high = HighLevelAgent()
+        model_high = HighLevelAgent(input_dim=60*24 + 4)
     if model_low is None:
-        model_low = ActorCriticNetwork(L=59, W=23, action_size=59*23+1)
+        model_low = ActorCriticNetwork(L=60, W=24, action_size=60*24+1)
     
     # Create evaluator
-    evaluator = EvaluationMetrics(container_dims=(59, 23, 23))
+    evaluator = EvaluationMetrics(container_dims=(60, 24, 26))
     
     # Setup visualization
-    visualizer = ContainerVisualizer(container_dims=(59, 23, 23)) if save_visualizations else None
+    visualizer = ContainerVisualizer(container_dims=(60, 24, 26)) if save_visualizations else None
     vis_dir = Path('outputs/evaluation_visualizations') if save_visualizations else None
     if save_visualizations:
         vis_dir.mkdir(parents=True, exist_ok=True)
@@ -650,16 +644,29 @@ def evaluate(model_high=None, model_low=None, num_episodes=5, use_mcts=True,
         # Save visualization for this episode
         if save_visualizations and len(env.placed_items) > 0:
             try:
-                vis_file = vis_dir / f"eval_episode_{episode:03d}.png"
-                visualizer.visualize_packing_2d(
+                title = f"Eval Episode {episode}: util={result['utilization']:.1f}%, bal={result['load_balance']:.3f}"
+                
+                # Save 2D Visualization
+                fig_2d = visualizer.visualize_packing_2d(
                     env.placed_items,
                     env.placed_positions,
                     env.height_map,
-                    title=f"Eval Episode {episode}: util={result['utilization']:.1f}%, "
-                          f"bal={result['load_balance']:.3f}"
+                    title=title
                 )
-                plt.savefig(str(vis_file), dpi=100, bbox_inches='tight')
-                plt.close()
+                vis_file_2d = vis_dir / f"eval_episode_{episode:03d}_2d.png"
+                fig_2d.savefig(str(vis_file_2d), dpi=100, bbox_inches='tight')
+                plt.close(fig_2d)
+                
+                # Save 3D Visualization
+                fig_3d = visualizer.visualize_packing_3d(
+                    env.placed_items,
+                    env.placed_positions,
+                    title=title,
+                    view=(25, 45)
+                )
+                vis_file_3d = vis_dir / f"eval_episode_{episode:03d}_3d.png"
+                fig_3d.savefig(str(vis_file_3d), dpi=100, bbox_inches='tight')
+                plt.close(fig_3d)
             except Exception as e:
                 pass  # Silently skip visualization errors
     
@@ -683,12 +690,12 @@ if __name__ == "__main__":
     print("=" * 70)
     
     # Import necessary modules
-    from rl.high_level_agent import HighLevelAgent
+    from src.learning.models.high_level_agent import HighLevelAgent
     from src.learning.models.actor_critic import ActorCriticNetwork
     
     # Create models
-    model_high = HighLevelAgent()
-    model_low = ActorCriticNetwork(L=59, W=23, action_size=59*23+1)
+    model_high = HighLevelAgent(input_dim=60*24 + 4)
+    model_low = ActorCriticNetwork(L=60, W=24, action_size=60*24+1)
     
     # Run evaluation
     results = evaluate(model_high, model_low, num_episodes=3, use_mcts=False)

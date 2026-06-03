@@ -173,10 +173,13 @@ class ActionMask:
 
         hm = height_map.map if hasattr(height_map, 'map') else height_map
 
-        # Fast path: use feasibility_map with sliding window (very fast, approximate)
-        if use_structural_validation and feasibility_map is not None and fast_stability_mask:
-            windows = sliding_window_view(feasibility_map, (item_length, item_width))
-            valid_fm = windows.any(axis=(-2, -1))
+        # Fast path: use height_map and support area ratio (very fast, highly accurate physical approximation)
+        if use_structural_validation and fast_stability_mask:
+            windows = sliding_window_view(hm, (item_length, item_width))
+            max_heights = windows.max(axis=(-2, -1))
+            # Require at least 60% of the footprint area to be supported at the max height of the window
+            support_counts = (windows == max_heights[..., None, None]).sum(axis=(-2, -1))
+            valid_fm = support_counts >= (item_length * item_width * 0.6)
             mask[:max_x, :max_y] = valid_fm
             mask &= candidate_mask
             return mask

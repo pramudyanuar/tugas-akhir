@@ -94,11 +94,14 @@ class CandidateGenerator:
         center_y = (self.W - 1) / 2.0
 
         if zone_priority == 'left_to_right':
-            return -x
+            # Prioritize y=0 (left) to y=W (right), then smaller x (back wall)
+            return -y * 100 - x
         if zone_priority == 'right_to_left':
-            return x
+            # Prioritize y=W (right) to y=0 (left), then smaller x (back wall)
+            return y * 100 - x
         if zone_priority == 'front_to_back':
-            return -y
+            # Prioritize x=L (front door) to x=0 (back wall), then smaller y (left wall)
+            return x * 100 - y
         if zone_priority == 'back_to_front':
             # Pintu di x = L, dinding belakang di x = 0.
             # Prioritaskan x kecil (belakang) terlebih dahulu, baru isi y (lebar 0-24).

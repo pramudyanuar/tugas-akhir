@@ -376,6 +376,7 @@ class RepackTrial:
         # Update feasibility map if enabled
         if (
             getattr(self.env, 'use_structural_validation', False)
+            and not getattr(self.env, 'fast_stability_mask', False)
             and new_state.get('feasibility_map') is not None
             and height_map is not None
         ):
