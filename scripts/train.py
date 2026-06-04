@@ -62,7 +62,7 @@ class TrainingLogger:
             self.tb_logger.log_scalar(tag, value, step)
         
     def log_episode(self, episode_reward, episode_length, utilization,
-                    items_placed, total_items, step=None):
+                    items_placed, total_items, step=None, buffer_stats=None):
         """Log episode metrics."""
         success_rate = (items_placed / total_items * 100) if total_items > 0 else 0.0
         
@@ -79,6 +79,9 @@ class TrainingLogger:
             self._log_scalar('episode/success_rate', success_rate, log_step)
             self._log_scalar('episode/items_placed', items_placed, log_step)
             self._log_scalar('episode/total_items', total_items, log_step)
+            if buffer_stats is not None:
+                for k, v in buffer_stats.items():
+                    self._log_scalar(f'buffer/{k}', v, log_step)
 
     def log_update(self, a3c_loss=None, high_level_loss=None, step=None):
         """Log loss values from update steps."""
@@ -804,6 +807,7 @@ class TrainingLoop:
                     items_placed,
                     total_items,
                     step=self.total_steps,
+                    buffer_stats=self.env.get_buffer_stats(),
                 )
                 self.logger.print_episode_summary(self.episode_count, episode_reward, 
                                                  episode_length, utilization, 
@@ -950,7 +954,9 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
           early_stop=True, early_stop_metric='utilization_mean',
           early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
           tb_log_dir='logs/tensorboard', tb_experiment='train_single',
-          resume_a3c=None, resume_high_level=None):
+          resume_a3c=None, resume_high_level=None,
+          buffer_capacity=3, max_waiting_steps=5,
+          defer_penalty=-0.02, overflow_penalty=-0.5):
     """
     Main training function.
     
@@ -982,6 +988,10 @@ def train(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type='rand
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
         max_episode_length=n_steps * 2,
+        buffer_capacity=buffer_capacity,
+        max_waiting_steps=max_waiting_steps,
+        defer_penalty=defer_penalty,
+        overflow_penalty=overflow_penalty,
     )
     env.debug_mask_stats = bool(debug_mask)
     state, action_mask = env.reset()
@@ -1191,6 +1201,10 @@ def _a3c_worker(worker_id, shared_model, shared_optimizer,
         perfect_pack_size_bias=config['pp_size_bias'],
         perfect_pack_mean_ratio=config['pp_mean_ratio'],
         fast_stability_mask=config['fast_stability_mask'],
+        buffer_capacity=config.get('buffer_capacity', 3),
+        max_waiting_steps=config.get('max_waiting_steps', 5),
+        defer_penalty=config.get('defer_penalty', -0.02),
+        overflow_penalty=config.get('overflow_penalty', -0.5),
     )
     env.debug_mask_stats = bool(config['debug_mask'])
     print(f"Worker {worker_id} ContainerEnv initialized.", flush=True)
@@ -1269,7 +1283,9 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
                 early_stop=True, early_stop_metric='utilization_mean',
                 early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
                 tb_log_dir='logs/tensorboard', tb_experiment='train_async',
-                resume_a3c=None, resume_high_level=None):
+                resume_a3c=None, resume_high_level=None,
+                buffer_capacity=3, max_waiting_steps=5,
+                defer_penalty=-0.02, overflow_penalty=-0.5):
     if device != 'cpu':
         print("Async A3C uses CPU workers; switching device to cpu.")
         device = 'cpu'
@@ -1288,6 +1304,10 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         perfect_pack_mean_ratio=pp_mean_ratio,
         fast_stability_mask=fast_stability_mask,
         max_episode_length=rollout_steps*2,
+        buffer_capacity=buffer_capacity,
+        max_waiting_steps=max_waiting_steps,
+        defer_penalty=defer_penalty,
+        overflow_penalty=overflow_penalty,
     )
     state_size = env.state_size
     action_size = env.action_size
@@ -1340,6 +1360,10 @@ def train_async(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_type
         'use_mcts_prob': use_mcts_prob,
         'tb_log_dir': tb_log_dir,
         'tb_experiment': tb_experiment,
+        'buffer_capacity': buffer_capacity,
+        'max_waiting_steps': max_waiting_steps,
+        'defer_penalty': defer_penalty,
+        'overflow_penalty': overflow_penalty,
     }
 
     processes = []
@@ -1405,7 +1429,9 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
                   early_stop=True, early_stop_metric='utilization_mean',
                   early_stop_patience=10, early_stop_min_delta=0.1, early_stop_min_epochs=10,
                   tb_log_dir='logs/tensorboard', tb_experiment='train_batched',
-                  resume_a3c=None, resume_high_level=None):
+                  resume_a3c=None, resume_high_level=None,
+                  buffer_capacity=3, max_waiting_steps=5,
+                  defer_penalty=-0.02, overflow_penalty=-0.5):
     envs = []
     for idx in range(int(batched_envs)):
         env = ContainerEnv(
@@ -1421,6 +1447,10 @@ def train_batched(num_epochs=10, n_steps=2048, seed=42, device='cpu', dataset_ty
             perfect_pack_mean_ratio=pp_mean_ratio,
             fast_stability_mask=fast_stability_mask,
             max_episode_length=rollout_steps*2,
+            buffer_capacity=buffer_capacity,
+            max_waiting_steps=max_waiting_steps,
+            defer_penalty=defer_penalty,
+            overflow_penalty=overflow_penalty,
         )
         env.debug_mask_stats = bool(debug_mask)
         envs.append(env)
@@ -1875,7 +1905,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='cpu', help='Device: cpu or cuda')
     parser.add_argument('--dataset', type=str, default='perfect_pack',
-                        help='Dataset: perfect_pack or perfect_pack_layered')
+                        help='Dataset: perfect_pack, perfect_pack_layered, perfect_pack_pt, or rs')
     parser.add_argument('--layered-min-height', type=int, default=2, help='Min layer height for perfect_pack_layered')
     parser.add_argument('--layered-max-height', type=int, default=6, help='Max layer height for perfect_pack_layered')
     parser.add_argument('--pp-sigma', type=float, default=4, help='Perfect pack Gaussian sigma')
@@ -1920,14 +1950,18 @@ if __name__ == "__main__":
                         help='Path to A3C checkpoint to resume training')
     parser.add_argument('--resume-high-level', type=str, default=None,
                         help='Path to HighLevelAgent checkpoint to resume training')
+    parser.add_argument('--buffer-capacity', type=int, default=3, help='Capacity of holding buffer (0 to disable)')
+    parser.add_argument('--max-waiting-steps', type=int, default=5, help='Max waiting steps in buffer before eviction')
+    parser.add_argument('--defer-penalty', type=float, default=-0.02, help='Penalty for deferring an item')
+    parser.add_argument('--overflow-penalty', type=float, default=-0.5, help='Penalty for buffer overflow/rejection')
     
     args = parser.parse_args()
     
     print("\n" + "="*70)
     print("3D BIN PACKING WITH A3C TRAINING")
     print("="*70)
-    if args.dataset not in {'perfect_pack', 'perfect_pack_layered'}:
-        raise ValueError("Training hanya mendukung dataset 'perfect_pack' atau 'perfect_pack_layered'.")
+    if args.dataset not in {'perfect_pack', 'perfect_pack_layered', 'perfect_pack_pt', 'rs'}:
+        raise ValueError("Training hanya mendukung dataset 'perfect_pack', 'perfect_pack_layered', 'perfect_pack_pt', atau 'rs'.")
 
     print(
         f"Config: epochs={args.num_epochs}, steps={args.n_steps}, "
@@ -1940,7 +1974,9 @@ if __name__ == "__main__":
         f"ckpt_steps={args.checkpoint_steps}, candidate_top_k={args.candidate_top_k}, "
         f"mcts_budget={args.mcts_budget}, use_mcts_prob={args.use_mcts_prob}, "
         f"early_stop={not args.no_early_stop}, early_stop_metric={args.early_stop_metric}, "
-        f"early_stop_patience={args.early_stop_patience}\n"
+        f"early_stop_patience={args.early_stop_patience}, buffer_capacity={args.buffer_capacity}, "
+        f"max_waiting_steps={args.max_waiting_steps}, defer_penalty={args.defer_penalty}, "
+        f"overflow_penalty={args.overflow_penalty}\n"
     )
     
     # Train with parsed arguments
@@ -1976,6 +2012,10 @@ if __name__ == "__main__":
             early_stop_min_epochs=args.early_stop_min_epochs,
             resume_a3c=args.resume_a3c,
             resume_high_level=args.resume_high_level,
+            buffer_capacity=args.buffer_capacity,
+            max_waiting_steps=args.max_waiting_steps,
+            defer_penalty=args.defer_penalty,
+            overflow_penalty=args.overflow_penalty,
         )
     elif args.batched_envs > 1:
         train_batched(
@@ -2009,6 +2049,10 @@ if __name__ == "__main__":
             early_stop_min_epochs=args.early_stop_min_epochs,
             resume_a3c=args.resume_a3c,
             resume_high_level=args.resume_high_level,
+            buffer_capacity=args.buffer_capacity,
+            max_waiting_steps=args.max_waiting_steps,
+            defer_penalty=args.defer_penalty,
+            overflow_penalty=args.overflow_penalty,
         )
     else:
         training_loop, a3c = train(
@@ -2040,6 +2084,10 @@ if __name__ == "__main__":
             early_stop_min_epochs=args.early_stop_min_epochs,
             resume_a3c=args.resume_a3c,
             resume_high_level=args.resume_high_level,
+            buffer_capacity=args.buffer_capacity,
+            max_waiting_steps=args.max_waiting_steps,
+            defer_penalty=args.defer_penalty,
+            overflow_penalty=args.overflow_penalty,
         )
     
     print("\nTraining completed successfully!")

@@ -55,7 +55,8 @@ class TestContainerEnv:
         skip_action = env.L * env.W
         (next_state, next_mask), reward, done, info = env.step(skip_action)
         
-        assert info['action_type'] == 'skip', "Should be skip action!"
+        assert info['action_type'] in ['skip', 'defer'], f"Should be skip or defer action, got: {info['action_type']}"
+
 
     def test_utilization_calculation(self):
         """Test utilization calculation during episode."""
