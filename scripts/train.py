@@ -889,7 +889,9 @@ class TrainingLoop:
                                     'w': int(item.get('w', 0)),
                                     'h': int(item.get('h', 0)),
                                     'stacking': str(item.get('stacking', 'stackable')),
-                                    'fragile': bool(item.get('fragile', False))
+                                    'fragile': bool(item.get('fragile', False)),
+                                    'weight': float(item.get('weight', 0.0)),
+                                    'load_bearing': "inf" if item.get('load_bearing', float('inf')) == float('inf') or item.get('load_bearing', 0.0) > 1e9 else float(item.get('load_bearing', 0.0))
                                 }
                                 for item in self.env.placed_items
                             ],
