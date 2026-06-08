@@ -384,7 +384,7 @@ class ContainerEnv:
         # Skip action (index == L*W)
         if action == self.L * self.W:
             # Check if buffer is not full
-            if len(self.deferred_buffer) < self.buffer_capacity:
+            if self.buffer_capacity > 0 and len(self.deferred_buffer) < self.buffer_capacity:
                 deferred_item = dict(current_item)
                 deferred_item['waiting_time'] = 0
                 deferred_item['arrival_step'] = self.episode_length
@@ -392,7 +392,7 @@ class ContainerEnv:
                 self.num_deferred_items += 1
                 reward = self.defer_penalty
                 action_type = 'defer'
-            else:
+            elif self.buffer_capacity > 0:
                 # Buffer is full, try to place oldest/highest priority buffer item to free space
                 self.deferred_buffer.sort(key=lambda x: (
                     0 if x.get('waiting_time', 0) >= self.max_waiting_steps else 1,
@@ -446,6 +446,11 @@ class ContainerEnv:
                     reward = self.overflow_penalty
                     self.num_rejected_items += 1
                     action_type = 'reject_overflow'
+            else:
+                # Buffer capacity is 0, reject current incoming item immediately
+                reward = self.overflow_penalty
+                self.num_rejected_items += 1
+                action_type = 'reject_overflow'
                     
             self.current_index += 1
             done = self.current_index >= len(self.items)
@@ -478,7 +483,7 @@ class ContainerEnv:
                 )
             
             # Since position is invalid, try to defer to holding buffer
-            if len(self.deferred_buffer) < self.buffer_capacity:
+            if self.buffer_capacity > 0 and len(self.deferred_buffer) < self.buffer_capacity:
                 deferred_item = dict(current_item)
                 deferred_item['waiting_time'] = 0
                 deferred_item['arrival_step'] = self.episode_length
@@ -486,7 +491,7 @@ class ContainerEnv:
                 self.num_deferred_items += 1
                 reward = self.invalid_penalty + self.defer_penalty
                 action_type = 'invalid_deferred'
-            else:
+            elif self.buffer_capacity > 0:
                 # Buffer is full, try to place oldest/highest priority buffer item to free space
                 self.deferred_buffer.sort(key=lambda x: (
                     0 if x.get('waiting_time', 0) >= self.max_waiting_steps else 1,
@@ -540,6 +545,11 @@ class ContainerEnv:
                     reward = self.invalid_penalty + self.overflow_penalty
                     self.num_rejected_items += 1
                     action_type = 'invalid_reject_overflow'
+            else:
+                # Buffer capacity is 0, reject current incoming item immediately
+                reward = self.invalid_penalty + self.overflow_penalty
+                self.num_rejected_items += 1
+                action_type = 'invalid_reject_overflow'
                     
             self.current_index += 1
             done = self.current_index >= len(self.items)

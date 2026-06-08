@@ -275,6 +275,8 @@ class TrainingLoop:
         self.vis_dir.mkdir(parents=True, exist_ok=True)
         self.vis_interval = max(1, int(vis_interval))  # Save visualization every N episodes
         self.last_vis_episode = 0
+        self.best_utilization = 0.0
+
 
     def _select_hierarchical_action(self, state, action_mask, sample_strategy=True):
         """Select action with TWO-LEVEL HIERARCHICAL RL:
@@ -814,6 +816,94 @@ class TrainingLoop:
                                                  items_placed, total_items)
                 
                 self.episode_count += 1
+                
+                # Check for new best utilization (global across all workers/envs)
+                global_best_util = 0.0
+                best_dir = Path('logs/training/best')
+                best_json_path = best_dir / "best_placement_data.json"
+                if best_json_path.exists():
+                    try:
+                        import json
+                        with open(best_json_path, 'r') as jf:
+                            data = json.load(jf)
+                            global_best_util = float(data.get('utilization', 0.0))
+                    except Exception:
+                        pass
+                
+                self.best_utilization = max(self.best_utilization, global_best_util)
+                
+                if utilization > self.best_utilization:
+                    # Remove previously saved best visualization files from this env's vis_dir
+                    try:
+                        for old_best_file in self.vis_dir.glob("*_best.png"):
+                            try:
+                                old_best_file.unlink()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                        
+                    self.best_utilization = utilization
+                    print(
+                        f"\n⭐ NEW GLOBAL BEST UTILIZATION: {utilization:.2f}% (Episode {self.episode_count})! "
+                        f"Saving checkpoints, raw data, and 2D/3D/cross-section visualizations...\n",
+                        flush=True
+                    )
+                    best_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save model checkpoints
+                    self.a3c.save_checkpoint(str(best_dir / "best_a3c.pt"))
+                    if self.high_level_agent is not None:
+                        torch.save(self.high_level_agent.state_dict(), str(best_dir / "best_high_level.pt"))
+                    
+                    # Generate and copy visualizations
+                    vis_start = time.perf_counter()
+                    self._save_visualization(self.episode_count, suffix="_best")
+                    try:
+                        import shutil
+                        src_2d = self.vis_dir / f"episode_{self.episode_count:04d}_2d_best.png"
+                        src_cross = self.vis_dir / f"episode_{self.episode_count:04d}_cross_best.png"
+                        if src_2d.exists():
+                            shutil.copy(str(src_2d), str(best_dir / "best_2d.png"))
+                        if src_cross.exists():
+                            shutil.copy(str(src_cross), str(best_dir / "best_cross.png"))
+                        view_angles = [(25, 45), (35, 135), (20, 225), (15, 315)]
+                        for elev, azim in view_angles:
+                            src_3d = self.vis_dir / f"episode_{self.episode_count:04d}_3d_e{int(elev)}_a{int(azim)}_best.png"
+                            if src_3d.exists():
+                                shutil.copy(str(src_3d), str(best_dir / f"best_3d_e{int(elev)}_a{int(azim)}.png"))
+                    except Exception as copy_err:
+                        print(f"Error copying best visualization files: {copy_err}", flush=True)
+                    
+                    # Save raw placement data
+                    try:
+                        import json
+                        best_data = {
+                            'episode': self.episode_count,
+                            'utilization': float(utilization),
+                            'reward': float(episode_reward),
+                            'length': int(episode_length),
+                            'placed_items': [
+                                {
+                                    'l': int(item.get('l', 0)),
+                                    'w': int(item.get('w', 0)),
+                                    'h': int(item.get('h', 0)),
+                                    'stacking': str(item.get('stacking', 'stackable')),
+                                    'fragile': bool(item.get('fragile', False))
+                                }
+                                for item in self.env.placed_items
+                            ],
+                            'placed_positions': [
+                                {'x': int(pos[0]), 'y': int(pos[1]), 'z': int(pos[2])}
+                                for pos in self.env.placed_positions
+                            ]
+                        }
+                        with open(best_json_path, "w") as jf:
+                            json.dump(best_data, jf, indent=4)
+                    except Exception as json_err:
+                        print(f"Error saving best placement JSON data: {json_err}", flush=True)
+                    
+                    timing['visualization_s'] += time.perf_counter() - vis_start
                 
                 # Save visualization every vis_interval episodes
                 if self.episode_count % self.vis_interval == 0 and self.episode_count > self.last_vis_episode:
